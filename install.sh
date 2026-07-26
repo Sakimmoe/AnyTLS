@@ -69,7 +69,7 @@ case "$(uname -m)" in
 esac
 
 echo "⬇️ 获取 AnyTLS 最新版本..."
-VERSION=$(curl -s ${GITHUB_API} | jq -r '.tag_name')
+VERSION=$(curl -s ${GITHUB_API} | jq -r '.tag_name' 2>/dev/null || true)
 if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
     echo "❌ 获取版本失败，请检查网络"
     exit 1
@@ -97,7 +97,7 @@ else
     cp ${TMP}/anytls.pkg ${TMP}/anytls-server
 fi
 
-FILE=$(find ${TMP} -type f \( -name "anytls-server" -o -name "anytls" \) | head -1)
+FILE=$(find ${TMP} -type f \( -name "anytls*" -o -name "server*" \) ! -name "*.pkg" | head -1)
 if [ -z "$FILE" ]; then
     echo "❌ 解压后未找到二进制文件"
     rm -rf ${TMP}
@@ -138,6 +138,9 @@ if ! systemctl is-active --quiet anytls; then
 fi
 
 echo "🛡️ 配置防火墙..."
+systemctl unmask ufw >/dev/null 2>&1 || true
+systemctl enable --now ufw >/dev/null 2>&1 || true
+
 ufw --force reset >/dev/null 2>&1 || true
 ufw default deny incoming >/dev/null 2>&1 || true
 ufw default allow outgoing >/dev/null 2>&1 || true
