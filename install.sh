@@ -76,7 +76,7 @@ esac
 
 echo "⬇️ 获取 AnyTLS 最新版本..."
 
-RELEASE_INFO=$(curl -s ${GITHUB_API})
+RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 ${GITHUB_API})
 
 VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
 
@@ -100,7 +100,7 @@ if [ -z "$ASSET_URL" ]; then
 fi
 
 TMP=$(mktemp -d)
-wget -q -O ${TMP}/anytls.pkg "$ASSET_URL" || {
+wget --timeout=30 -q -O ${TMP}/anytls.pkg "$ASSET_URL" || {
     echo "❌ AnyTLS 下载失败"
     rm -rf ${TMP}
     exit 1
