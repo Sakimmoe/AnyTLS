@@ -1,118 +1,116 @@
 #!/bin/bash
-set -uo pipefail
+set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-# 参数与路径设置
 ANYTLS_PORT=${1:-26216}
 ANYTLS_PASSWORD=${2:-kokonoeyukari}
 NET_MODE=${3:-}
-
-INSTALL_PATH="/usr/local/bin/anytls-server"
-CONFIG_DIR="/etc/anytls"
-CONFIG_FILE="${CONFIG_DIR}/config"
-SERVICE_FILE="/etc/systemd/system/anytls.service"
 GITHUB_API="https://api.github.com/repos/anytls/anytls-go/releases/latest"
 
-GREEN="\033[32m"
-RED="\033[31m"
-YELLOW="\033[33m"
-RESET="\033[0m"
+echo "=========================================="
+echo " AnyTLS 部署脚本"
+echo "=========================================="
 
-check_root(){
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}请使用 root 权限运行${RESET}"
-        exit 1
-    fi
-}
+if [ "$EUID" -ne 0 ]; then
+    echo "Error: 请使用 root 用户运行"
+    exit 1
+fi
 
-check_arch(){
-    case "$(uname -m)" in
-        x86_64|amd64) ARCH="amd64" ;;
-        aarch64|arm64) ARCH="arm64" ;;
-        *) echo "不支持的 CPU 架构"; exit 1 ;;
-    esac
-}
+echo "📦 安装依赖..."
+apt-get update -qq || true
+apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar 2>/dev/null || true
 
-install_dependencies(){
-    echo "📦 检查并安装依赖..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq || true
-        apt-get install -y -qq curl wget jq ufw openssl tar unzip >/dev/null 2>&1 || true
-    fi
-}
+echo "🌐 优化网络配置..."
+grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
 
-network_opt(){
-    echo "🌐 开启 BBR 网络优化..."
-    cat >/etc/sysctl.d/99-bbr.conf <<EOF
+systemctl disable systemd-resolved --now 2>/dev/null || true
+systemctl mask systemd-resolved 2>/dev/null || true
+rm -f /etc/resolv.conf
+cat > /etc/resolv.conf << EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 2606:4700:4700::1111
+nameserver 2001:4860:4860::8888
+EOF
+chattr +i /etc/resolv.conf 2>/dev/null || true
+
+cat > /etc/sysctl.d/99-bbr.conf << 'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
-    sysctl --system >/dev/null 2>&1 || true
-}
+sysctl --system >/dev/null || true
 
-get_latest(){
-    echo "🔎 获取 AnyTLS 最新版本号..."
-    VERSION=$(curl -s ${GITHUB_API} | jq -r '.tag_name' 2>/dev/null || true)
-    if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-        echo -e "${RED}获取最新版本失败，请检查网络连接${RESET}"
-        exit 1
-    fi
-    echo "最新版本: ${VERSION}"
-}
+echo "📡 获取服务器 IP..."
+IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org || echo "无")
+IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org || echo "无")
+MAIN_IP=$([ "$IPV4" != "无" ] && echo "$IPV4" || echo "$IPV6")
 
-download_anytls(){
-    echo "⬇️ 下载 AnyTLS 二进制文件..."
-    ASSET_URL=$(curl -s ${GITHUB_API} \
-    | jq -r ".assets[].browser_download_url" \
-    | grep -i "linux" \
-    | grep -i "${ARCH}" \
-    | grep -v -i "sha256" \
-    | head -1 || true)
+if [ "$NET_MODE" = "4" ]; then
+    LISTEN_ADDR="0.0.0.0"
+else
+    LISTEN_ADDR="[::]"
+fi
 
-    if [ -z "$ASSET_URL" ]; then
-        echo -e "${RED}未找到适用于 Linux ${ARCH} 的下载文件${RESET}"
-        exit 1
-    fi
+echo "🚀 部署 AnyTLS..."
+systemctl stop anytls 2>/dev/null || true
+sleep 1
 
-    TMP=$(mktemp -d)
-    wget -q "$ASSET_URL" -O ${TMP}/anytls.pkg
+if ss -tlnp | grep -q ":${ANYTLS_PORT} "; then
+    echo "❌ 端口 ${ANYTLS_PORT} 已被占用"
+    ss -tlnp | grep ":${ANYTLS_PORT} "
+    exit 1
+fi
 
-    case "$ASSET_URL" in
-        *.tar.gz) tar -xf ${TMP}/anytls.pkg -C ${TMP} ;;
-        *.zip) unzip -q ${TMP}/anytls.pkg -d ${TMP} ;;
-        *) cp ${TMP}/anytls.pkg ${TMP}/anytls-server ;;
-    esac
+case "$(uname -m)" in
+    x86_64|amd64) ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) echo "❌ 不支持的架构"; exit 1 ;;
+esac
 
-    FILE=$(find ${TMP} -type f \( -name "anytls-server" -o -name "anytls" \) | head -1 || true)
-    if [ -z "$FILE" ]; then
-        echo -e "${RED}解压后未找到二进制文件${RESET}"
-        rm -rf ${TMP}
-        exit 1
-    fi
+echo "⬇️ 获取 AnyTLS 最新版本..."
+VERSION=$(curl -s ${GITHUB_API} | jq -r '.tag_name')
+if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+    echo "❌ 获取版本失败，请检查网络"
+    exit 1
+fi
 
-    mkdir -p ${CONFIG_DIR}
-    cp "$FILE" ${INSTALL_PATH}
-    chmod +x ${INSTALL_PATH}
+ASSET_URL=$(curl -s ${GITHUB_API} | jq -r ".assets[].browser_download_url" | grep -i "linux" | grep -i "${ARCH}" | grep -v -i "sha256" | head -1 || true)
+if [ -z "$ASSET_URL" ]; then
+    echo "❌ 未找到适用于 Linux ${ARCH} 的下载文件"
+    exit 1
+fi
+
+TMP=$(mktemp -d)
+wget -q -O ${TMP}/anytls.pkg "$ASSET_URL" || {
+    echo "❌ AnyTLS 下载失败"
     rm -rf ${TMP}
+    exit 1
 }
 
-get_ip(){
-    IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org || echo "无")
-    IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org || echo "无")
-}
+rm -f /usr/local/bin/anytls-server
+if [[ "$ASSET_URL" == *.tar.gz ]]; then
+    tar -xf ${TMP}/anytls.pkg -C ${TMP}
+elif [[ "$ASSET_URL" == *.zip ]]; then
+    unzip -q -o ${TMP}/anytls.pkg -d ${TMP}
+else
+    cp ${TMP}/anytls.pkg ${TMP}/anytls-server
+fi
 
-create_service(){
-    LISTEN="[::]"
-    [ "$NET_MODE" = "4" ] && LISTEN="0.0.0.0"
+FILE=$(find ${TMP} -type f \( -name "anytls-server" -o -name "anytls" \) | head -1)
+if [ -z "$FILE" ]; then
+    echo "❌ 解压后未找到二进制文件"
+    rm -rf ${TMP}
+    exit 1
+fi
 
-    cat >${CONFIG_FILE} <<EOF
-PORT=${ANYTLS_PORT}
-PASSWORD=${ANYTLS_PASSWORD}
-LISTEN=${LISTEN}
-EOF
+cp "$FILE" /usr/local/bin/anytls-server
+chmod +x /usr/local/bin/anytls-server
+rm -rf ${TMP}
 
-    cat >${SERVICE_FILE} <<EOF
+mkdir -p /etc/anytls
+
+cat > /etc/systemd/system/anytls.service << EOF
 [Unit]
 Description=AnyTLS Server Service
 After=network.target
@@ -120,102 +118,64 @@ After=network.target
 [Service]
 Type=simple
 LimitNOFILE=65535
-ExecStart=${INSTALL_PATH} -l ${LISTEN}:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
-Restart=always
-RestartSec=3
+ExecStart=/usr/local/bin/anytls-server -l ${LISTEN_ADDR}:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
+Restart=on-failure
+RestartSec=3s
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable anytls >/dev/null 2>&1
-    systemctl restart anytls
-}
+systemctl daemon-reload
+systemctl enable anytls >/dev/null 2>&1 || true
+systemctl restart anytls >/dev/null 2>&1 || true
+sleep 2
 
-firewall(){
-    echo "🛡️ 配置防火墙放行端口..."
-    if command -v ufw >/dev/null 2>&1; then
-        ufw allow ${ANYTLS_PORT}/tcp >/dev/null 2>&1 || true
-        ufw allow ${ANYTLS_PORT}/udp >/dev/null 2>&1 || true
-    fi
-}
-
-show_info(){
-    get_ip
-    echo
-    echo "=============================="
-    echo "       AnyTLS 节点信息        "
-    echo "=============================="
-    echo "IPv4     : ${IPV4}"
-    echo "IPv6     : ${IPV6}"
-    echo "Port     : ${ANYTLS_PORT}"
-    echo "Password : ${ANYTLS_PASSWORD}"
-    echo "------------------------------"
-    echo "URI链接  :"
-    echo "anytls://${ANYTLS_PASSWORD}@${IPV4}:${ANYTLS_PORT}"
-    echo "=============================="
-    echo
-}
-
-install_anytls(){
-    check_root
-    check_arch
-    install_dependencies
-    network_opt
-    get_latest
-    download_anytls
-    create_service
-    firewall
-    
-    sleep 2
-    if systemctl is-active --quiet anytls; then
-        echo -e "${GREEN}AnyTLS 安装成功并已正常启动！${RESET}"
-        show_info
-    else
-        echo -e "${RED}AnyTLS 启动失败，请检查下方日志：${RESET}"
-        journalctl -u anytls -n 30 --no-pager
-    fi
-}
-
-menu(){
-    clear
-    echo "=============================="
-    echo "    AnyTLS 管理脚本           "
-    echo "=============================="
-    echo "1. 安装 AnyTLS"
-    echo "2. 查看节点信息"
-    echo "3. 启动服务"
-    echo "4. 停止服务"
-    echo "5. 重启服务"
-    echo "6. 查看实时日志"
-    echo "7. 卸载 AnyTLS"
-    echo "0. 退出"
-    echo "=============================="
-    read -p "请输入选项 [0-7]: " num
-
-    case $num in
-        1) install_anytls ;;
-        2) show_info ;;
-        3) systemctl start anytls && echo "已启动" ;;
-        4) systemctl stop anytls && echo "已停止" ;;
-        5) systemctl restart anytls && echo "已重启" ;;
-        6) journalctl -u anytls -f ;;
-        7)
-            systemctl stop anytls >/dev/null 2>&1 || true
-            systemctl disable anytls >/dev/null 2>&1 || true
-            rm -f ${SERVICE_FILE} ${INSTALL_PATH}
-            rm -rf ${CONFIG_DIR}
-            systemctl daemon-reload
-            echo "已成功卸载 AnyTLS"
-            ;;
-        0) exit 0 ;;
-        *) echo "输入无效" ;;
-    esac
-}
-
-if [ $# -gt 0 ]; then
-    install_anytls
-else
-    menu
+if ! systemctl is-active --quiet anytls; then
+    echo "❌ AnyTLS 启动失败"
+    journalctl -u anytls -n 20 --no-pager
+    exit 1
 fi
+
+echo "🛡️ 配置防火墙..."
+ufw --force reset >/dev/null 2>&1 || true
+ufw default deny incoming >/dev/null 2>&1 || true
+ufw default allow outgoing >/dev/null 2>&1 || true
+
+SSH_PORT=""
+if [ -f /etc/ssh/sshd_config ]; then
+    SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config | head -1 | awk '{print $2}' | tr -d '\r\n' || true)
+fi
+if [ -z "$SSH_PORT" ] && [ -d /etc/ssh/sshd_config.d ]; then
+    SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config.d/*.conf 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r\n' || true)
+fi
+if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]]; then
+    SSH_PORT=22
+fi
+
+ufw allow 22/tcp comment 'SSH fallback' >/dev/null 2>&1 || true
+ufw allow ${SSH_PORT}/tcp comment 'SSH' >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
+ufw --force enable >/dev/null 2>&1 || true
+ufw reload >/dev/null 2>&1 || true
+echo "✅ UFW 配置完成"
+
+echo "🧹 配置定时清理..."
+cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
+7 7 * * 0 root /bin/bash -c 'apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete' >/dev/null 2>&1
+CRONEOF
+chmod 644 /etc/cron.d/anytls-cleanup
+
+echo -e "\n=============================="
+echo " ✅ AnyTLS 部署完成"
+echo "=============================="
+echo " IPv4     : $IPV4"
+echo " IPv6     : $IPV6"
+echo " Port     : $ANYTLS_PORT"
+echo " Password : $ANYTLS_PASSWORD"
+echo " Mode     : $([ "$NET_MODE" = "4" ] && echo "IPv4 Only" || echo "Dual Stack")"
+echo "=============================="
+echo "客户端 URI 配置："
+echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:${ANYTLS_PORT}"
+echo "=============================="
