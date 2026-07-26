@@ -18,19 +18,19 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo "📦 安装依赖..."
-# 屏蔽老系统源失效带来的吓人报错
+# 隐藏 Debian 旧系统（如 bullseye）源失效导致的吓人报错，且不会中断脚本
 apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar >/dev/null 2>&1 || true
 
 echo "🌐 优化网络配置..."
 grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
 
-systemctl disable systemd-resolved --now 2>/dev/null || true
-systemctl mask systemd-resolved 2>/dev/null || true
+systemctl disable systemd-resolved --now >/dev/null 2>&1 || true
+systemctl mask systemd-resolved >/dev/null 2>&1 || true
 
-# 【修复核心点】必须先解锁（-i），才能执行删除和重写，否则二次运行必死
-chattr -i /etc/resolv.conf 2>/dev/null || true
-rm -f /etc/resolv.conf
+# 【关键修复】：必须先解锁 DNS 配置文件，防止重复运行脚本时因文件被锁导致 rm 报错中断
+chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
+rm -f /etc/resolv.conf >/dev/null 2>&1 || true
 
 cat > /etc/resolv.conf << EOF
 nameserver 1.1.1.1
@@ -38,8 +38,8 @@ nameserver 8.8.8.8
 nameserver 2606:4700:4700::1111
 nameserver 2001:4860:4860::8888
 EOF
-# 重新上锁
-chattr +i /etc/resolv.conf 2>/dev/null || true
+# 写入完成后重新上锁，防止被系统其他服务篡改
+chattr +i /etc/resolv.conf >/dev/null 2>&1 || true
 
 cat > /etc/sysctl.d/99-bbr.conf << 'EOF'
 net.core.default_qdisc=fq
@@ -59,7 +59,7 @@ else
 fi
 
 echo "🚀 部署 AnyTLS..."
-systemctl stop anytls 2>/dev/null || true
+systemctl stop anytls >/dev/null 2>&1 || true
 sleep 1
 
 if ss -tlnp | grep -q ":${ANYTLS_PORT} "; then
