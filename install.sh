@@ -18,28 +18,34 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo "📦 安装依赖..."
-apt-get update -qq || true
-apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar 2>/dev/null || true
+# 屏蔽老系统源失效带来的吓人报错
+apt-get update -qq >/dev/null 2>&1 || true
+apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar >/dev/null 2>&1 || true
 
 echo "🌐 优化网络配置..."
 grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
 
 systemctl disable systemd-resolved --now 2>/dev/null || true
 systemctl mask systemd-resolved 2>/dev/null || true
+
+# 【修复核心点】必须先解锁（-i），才能执行删除和重写，否则二次运行必死
+chattr -i /etc/resolv.conf 2>/dev/null || true
 rm -f /etc/resolv.conf
+
 cat > /etc/resolv.conf << EOF
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 nameserver 2606:4700:4700::1111
 nameserver 2001:4860:4860::8888
 EOF
+# 重新上锁
 chattr +i /etc/resolv.conf 2>/dev/null || true
 
 cat > /etc/sysctl.d/99-bbr.conf << 'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
-sysctl --system >/dev/null || true
+sysctl --system >/dev/null 2>&1 || true
 
 echo "📡 获取服务器 IP..."
 IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org || echo "无")
