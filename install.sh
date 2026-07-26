@@ -76,10 +76,13 @@ esac
 
 echo "⬇️ 获取 AnyTLS 最新版本..."
 VERSION=$(curl -s ${GITHUB_API} | jq -r '.tag_name' 2>/dev/null || true)
+
 if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
     echo "❌ 获取版本失败，请检查网络"
     exit 1
 fi
+
+echo "📌 当前 AnyTLS 版本: ${VERSION}"
 
 ASSET_URL=$(curl -s ${GITHUB_API} | jq -r ".assets[].browser_download_url" | grep -i "linux" | grep -i "${ARCH}" | grep -v -i "sha256" | head -1 || true)
 if [ -z "$ASSET_URL" ]; then
