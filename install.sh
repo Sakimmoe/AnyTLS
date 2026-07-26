@@ -3,87 +3,129 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
+# ==========================================
+# AnyTLS-go 一键安装管理脚本
+# ==========================================
 
-# =========================
-# AnyTLS 参数
-# =========================
 
 ANYTLS_PORT=${1:-26216}
 ANYTLS_PASSWORD=${2:-kokonoeyukari}
 NET_MODE=${3:-}
 
-ANYTLS_VERSION="v0.0.12"
 
-INSTALL_DIR="/usr/local/bin"
-SERVICE_NAME="anytls"
+INSTALL_PATH="/usr/local/bin/anytls-server"
+CONFIG_DIR="/etc/anytls"
+CONFIG_FILE="${CONFIG_DIR}/config"
+SERVICE_FILE="/etc/systemd/system/anytls.service"
+
+GITHUB_API="https://api.github.com/repos/anytls/anytls-go/releases/latest"
 
 
-echo "=========================================="
-echo " AnyTLS 部署脚本"
-echo "=========================================="
+GREEN="\033[32m"
+RED="\033[31m"
+YELLOW="\033[33m"
+RESET="\033[0m"
 
+
+
+# ==========================================
+# root检测
+# ==========================================
+
+check_root(){
 
 if [ "$EUID" -ne 0 ]; then
-    echo "❌ 请使用 root 用户运行"
-    exit 1
+
+echo -e "${RED}请使用root运行${RESET}"
+
+exit 1
+
 fi
 
+}
 
 
-# =========================
-# 安装依赖
-# =========================
 
-echo "📦 安装依赖..."
+
+# ==========================================
+# 架构
+# ==========================================
+
+check_arch(){
+
+case "$(uname -m)" in
+
+x86_64|amd64)
+
+ARCH="amd64"
+
+;;
+
+aarch64|arm64)
+
+ARCH="arm64"
+
+;;
+
+*)
+
+echo "不支持架构"
+
+exit 1
+
+;;
+
+esac
+
+}
+
+
+
+
+# ==========================================
+# 依赖
+# ==========================================
+
+install_dependencies(){
+
+echo "📦 安装依赖"
+
 
 apt-get update -qq || true
 
+
 apt-get install -y -qq \
-wget \
 curl \
+wget \
+jq \
 ufw \
-iproute2 \
-cron \
 openssl \
-tar \
+cron \
+iproute2 \
 ca-certificates \
-2>/dev/null || true
+tar \
+unzip \
+>/dev/null 2>&1 || true
+
+
+}
 
 
 
-# =========================
+
+# ==========================================
 # 网络优化
-# =========================
+# ==========================================
 
 
-echo "🌐 优化网络配置..."
+network_opt(){
 
 
-grep -q \
-"precedence ::ffff:0:0/96 100" \
-/etc/gai.conf 2>/dev/null \
+echo "🌐 网络优化"
+
+
+grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null \
 || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
-
-
-
-systemctl disable systemd-resolved --now 2>/dev/null || true
-
-systemctl mask systemd-resolved 2>/dev/null || true
-
-
-
-rm -f /etc/resolv.conf
-
-
-cat > /etc/resolv.conf <<EOF
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-nameserver 2606:4700:4700::1111
-nameserver 2001:4860:4860::8888
-EOF
-
-
-chattr +i /etc/resolv.conf 2>/dev/null || true
 
 
 
@@ -99,67 +141,115 @@ sysctl --system >/dev/null 2>&1 || true
 
 
 
-# =========================
-# 获取IP
-# =========================
+systemctl disable systemd-resolved --now 2>/dev/null || true
 
 
-echo "📡 获取服务器IP..."
+rm -f /etc/resolv.conf
 
 
-IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org || echo "无")
+cat >/etc/resolv.conf <<EOF
 
-IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org || echo "无")
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 2606:4700:4700::1111
+
+EOF
+
+
+chattr +i /etc/resolv.conf 2>/dev/null || true
+
+
+}
 
 
 
-MAIN_IP=$(
-if [ "$IPV4" != "无" ]; then
-    echo "$IPV4"
-else
-    echo "$IPV6"
+
+# ==========================================
+# 获取最新版
+# ==========================================
+
+
+get_latest(){
+
+echo "🔎 获取AnyTLS最新版"
+
+
+VERSION=$(curl -s ${GITHUB_API} | jq -r '.tag_name')
+
+
+if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+
+echo "获取版本失败"
+
+exit 1
+
 fi
-)
+
+
+echo "版本: ${VERSION}"
+
+
+}
 
 
 
-if [ "$NET_MODE" = "4" ]; then
 
-    LISTEN_ADDR="0.0.0.0"
+# ==========================================
+# 下载
+# ==========================================
 
-else
 
-    LISTEN_ADDR="[::]"
+download_anytls(){
+
+
+echo "⬇️ 下载 AnyTLS"
+
+
+ASSET_URL=$(curl -s ${GITHUB_API} \
+| jq -r ".assets[].browser_download_url" \
+| grep "${ARCH}" \
+| head -1)
+
+
+
+if [ -z "$ASSET_URL" ]; then
+
+echo -e "${RED}找不到下载文件${RESET}"
+
+exit 1
 
 fi
 
 
 
-
-# =========================
-# 架构检测
-# =========================
+TMP=$(mktemp -d)
 
 
-case "$(uname -m)" in
 
-x86_64|amd64)
-
-    ARCH="amd64"
-    ;;
+wget -q "$ASSET_URL" -O ${TMP}/anytls.pkg
 
 
-aarch64|arm64)
 
-    ARCH="arm64"
-    ;;
+case "$ASSET_URL" in
+
+
+*.tar.gz)
+
+tar -xf ${TMP}/anytls.pkg -C ${TMP}
+
+;;
+
+
+*.zip)
+
+unzip -q ${TMP}/anytls.pkg -d ${TMP}
+
+;;
 
 
 *)
 
-echo "❌ 不支持架构"
-
-exit 1
+cp ${TMP}/anytls.pkg ${TMP}/anytls-server
 
 ;;
 
@@ -167,51 +257,13 @@ esac
 
 
 
-
-# =========================
-# 下载 AnyTLS
-# =========================
-
-
-echo "🚀 下载 AnyTLS..."
-
-
-systemctl stop anytls 2>/dev/null || true
+FILE=$(find ${TMP} -name "anytls-server" | head -1)
 
 
 
-DOWNLOAD_URL="https://github.com/anytls/anytls-go/releases/download/${ANYTLS_VERSION}/anytls-linux-${ARCH}"
+if [ -z "$FILE" ]; then
 
-
-
-wget -q \
--O ${INSTALL_DIR}/anytls-server \
-"$DOWNLOAD_URL" \
-|| {
-
-echo "❌ AnyTLS 下载失败"
-
-exit 1
-
-}
-
-
-
-chmod +x ${INSTALL_DIR}/anytls-server
-
-
-
-
-# =========================
-# 端口检测
-# =========================
-
-
-if ss -tlnp | grep -q ":${ANYTLS_PORT} "; then
-
-echo "❌ 端口 ${ANYTLS_PORT} 已被占用"
-
-ss -tlnp | grep ":${ANYTLS_PORT}"
+echo "未找到二进制文件"
 
 exit 1
 
@@ -219,20 +271,80 @@ fi
 
 
 
-
-# =========================
-# systemd
-# =========================
+mkdir -p ${CONFIG_DIR}
 
 
-echo "⚙️ 创建服务..."
+cp "$FILE" ${INSTALL_PATH}
 
 
-cat >/etc/systemd/system/anytls.service <<EOF
+chmod +x ${INSTALL_PATH}
+
+
+
+rm -rf ${TMP}
+
+
+}
+
+
+
+
+# ==========================================
+# IP
+# ==========================================
+
+get_ip(){
+
+
+IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org || echo 无)
+
+
+IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org || echo 无)
+
+
+}
+
+
+
+
+# ==========================================
+# 配置
+# ==========================================
+
+
+create_service(){
+
+
+if [ "$NET_MODE" = "4" ]; then
+
+LISTEN="0.0.0.0"
+
+else
+
+LISTEN="[::]"
+
+fi
+
+
+
+cat >${CONFIG_FILE} <<EOF
+
+PORT=${ANYTLS_PORT}
+
+PASSWORD=${ANYTLS_PASSWORD}
+
+LISTEN=${LISTEN}
+
+EOF
+
+
+
+
+cat >${SERVICE_FILE} <<EOF
 
 [Unit]
 
-Description=AnyTLS Proxy Service
+Description=AnyTLS Server
 
 After=network.target
 
@@ -244,7 +356,7 @@ Type=simple
 
 LimitNOFILE=65535
 
-ExecStart=/usr/local/bin/anytls-server -l ${LISTEN_ADDR}:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
+ExecStart=${INSTALL_PATH} -l ${LISTEN}:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
 
 Restart=always
 
@@ -260,57 +372,45 @@ EOF
 
 
 
+
 systemctl daemon-reload
 
-
-systemctl enable anytls >/dev/null 2>&1 || true
-
+systemctl enable anytls >/dev/null 2>&1
 
 systemctl restart anytls
 
 
-
-sleep 2
-
-
-
-if ! systemctl is-active --quiet anytls; then
-
-echo "❌ AnyTLS启动失败"
-
-journalctl -u anytls -n 30 --no-pager
-
-exit 1
-
-fi
+}
 
 
 
 
-# =========================
+# ==========================================
 # 防火墙
-# =========================
+# ==========================================
 
 
-echo "🛡️ 配置UFW..."
+firewall(){
+
+
+echo "🛡️ 配置防火墙"
+
 
 
 ufw --force reset >/dev/null 2>&1 || true
 
 
-ufw default deny incoming >/dev/null 2>&1 || true
-
-ufw default allow outgoing >/dev/null 2>&1 || true
+ufw default deny incoming >/dev/null 2>&1
 
 
-
-SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config 2>/dev/null \
-| head -1 \
-| awk '{print $2}')
+ufw default allow outgoing >/dev/null 2>&1
 
 
 
-if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]]; then
+SSH_PORT=$(grep -Ei '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+
+
+if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]];then
 
 SSH_PORT=22
 
@@ -318,57 +418,60 @@ fi
 
 
 
-ufw allow 22/tcp >/dev/null 2>&1 || true
+ufw allow ${SSH_PORT}/tcp >/dev/null 2>&1
 
-ufw allow ${SSH_PORT}/tcp >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/tcp >/dev/null 2>&1
 
-
-ufw allow ${ANYTLS_PORT}/tcp comment "AnyTLS TCP" >/dev/null 2>&1 || true
-
-
-ufw allow ${ANYTLS_PORT}/udp comment "AnyTLS UDP" >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/udp >/dev/null 2>&1
 
 
-ufw --force enable >/dev/null 2>&1 || true
+ufw --force enable >/dev/null 2>&1
 
 
-ufw reload >/dev/null 2>&1 || true
+}
 
 
 
 
-# =========================
-# 定时清理
-# =========================
+# ==========================================
+# 清理
+# ==========================================
 
 
-echo "🧹 添加清理任务..."
+cleanup(){
 
 
-cat >/etc/cron.d/anytls-cleanup <<'EOF'
+cat >/etc/cron.d/anytls-clean <<EOF
 
-7 7 * * 0 root apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete
+7 7 * * 0 root apt-get clean && journalctl --vacuum-time=5d --vacuum-size=30M
 
 EOF
 
 
-chmod 644 /etc/cron.d/anytls-cleanup
+}
 
 
 
 
-# =========================
-# 输出
-# =========================
+# ==========================================
+# 信息
+# ==========================================
+
+
+show_info(){
+
+
+get_ip
 
 
 echo
 
 echo "=============================="
 
-echo "✅ AnyTLS 部署完成"
+echo " AnyTLS节点信息"
 
 echo "=============================="
+
 
 echo "IPv4 : ${IPV4}"
 
@@ -378,14 +481,172 @@ echo "Port : ${ANYTLS_PORT}"
 
 echo "Password : ${ANYTLS_PASSWORD}"
 
-echo "Mode : $([ "$NET_MODE" = "4" ] && echo IPv4-Only || echo Dual-Stack)"
+
 
 echo
 
-echo "AnyTLS URI:"
+echo "URI:"
 
-echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:${ANYTLS_PORT}"
+echo "anytls://${ANYTLS_PASSWORD}@${IPV4}:${ANYTLS_PORT}"
 
 echo
+
+}
+
+
+
+
+
+install_anytls(){
+
+
+check_root
+
+check_arch
+
+install_dependencies
+
+network_opt
+
+get_latest
+
+download_anytls
+
+create_service
+
+firewall
+
+cleanup
+
+
+sleep 2
+
+
+if systemctl is-active --quiet anytls;then
+
+echo -e "${GREEN}AnyTLS安装成功${RESET}"
+
+show_info
+
+
+else
+
+echo "启动失败"
+
+journalctl -u anytls -n 30 --no-pager
+
+fi
+
+
+}
+
+
+
+
+
+# ==========================================
+# 管理
+# ==========================================
+
+
+menu(){
+
+
+clear
+
 
 echo "=============================="
+
+echo " AnyTLS 管理脚本"
+
+echo "=============================="
+
+echo "1. 安装 AnyTLS"
+
+echo "2. 查看节点"
+
+echo "3. 启动"
+
+echo "4. 停止"
+
+echo "5. 重启"
+
+echo "6. 日志"
+
+echo "7. 卸载"
+
+echo "0.退出"
+
+echo "=============================="
+
+
+read -p "选择:" num
+
+
+
+case $num in
+
+1) install_anytls ;;
+
+2) show_info ;;
+
+3) systemctl start anytls ;;
+
+4) systemctl stop anytls ;;
+
+5) systemctl restart anytls ;;
+
+6) journalctl -u anytls -f ;;
+
+7)
+
+systemctl stop anytls || true
+
+systemctl disable anytls || true
+
+rm -f ${SERVICE_FILE}
+
+rm -f ${INSTALL_PATH}
+
+rm -rf ${CONFIG_DIR}
+
+systemctl daemon-reload
+
+echo "卸载完成"
+
+;;
+
+0)
+
+exit 0
+
+;;
+
+*)
+
+echo "错误"
+
+;;
+
+esac
+
+
+}
+
+
+
+
+# ==========================================
+# 主入口
+# ==========================================
+
+
+if [ $# -gt 0 ];then
+
+install_anytls
+
+else
+
+menu
+
+fi
