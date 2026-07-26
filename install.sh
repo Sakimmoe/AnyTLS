@@ -75,7 +75,10 @@ case "$(uname -m)" in
 esac
 
 echo "⬇️ 获取 AnyTLS 最新版本..."
-VERSION=$(curl -s ${GITHUB_API} | jq -r '.tag_name' 2>/dev/null || true)
+
+RELEASE_INFO=$(curl -s ${GITHUB_API})
+
+VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
 
 if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
     echo "❌ 获取版本失败，请检查网络"
@@ -84,7 +87,13 @@ fi
 
 echo "📌 当前 AnyTLS 版本: ${VERSION}"
 
-ASSET_URL=$(curl -s ${GITHUB_API} | jq -r ".assets[].browser_download_url" | grep -i "linux" | grep -i "${ARCH}" | grep -v -i "sha256" | head -1 || true)
+ASSET_URL=$(echo "$RELEASE_INFO" \
+| jq -r ".assets[].browser_download_url" \
+| grep -i "linux" \
+| grep -i "${ARCH}" \
+| grep -v -i "sha256" \
+| head -1 || true)
+
 if [ -z "$ASSET_URL" ]; then
     echo "❌ 未找到适用于 Linux ${ARCH} 的下载文件"
     exit 1
@@ -106,7 +115,7 @@ else
     cp ${TMP}/anytls.pkg ${TMP}/anytls-server
 fi
 
-FILE=$(find ${TMP} -type f \( -name "anytls*" -o -name "server*" \) ! -name "*.pkg" | head -1)
+FILE=$(find ${TMP} -type f -name "anytls-server" | head -1)
 if [ -z "$FILE" ]; then
     echo "❌ 解压后未找到二进制文件"
     rm -rf ${TMP}
