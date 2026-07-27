@@ -18,7 +18,6 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo "📦 安装依赖..."
-# 隐藏 Debian 旧系统（如 bullseye）源失效导致的吓人报错，且不会中断脚本
 apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar >/dev/null 2>&1 || true
 
@@ -28,7 +27,6 @@ grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "preced
 systemctl disable systemd-resolved --now >/dev/null 2>&1 || true
 systemctl mask systemd-resolved >/dev/null 2>&1 || true
 
-# 【关键修复】：必须先解锁 DNS 配置文件，防止重复运行脚本时因文件被锁导致 rm 报错中断
 chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
 rm -f /etc/resolv.conf >/dev/null 2>&1 || true
 
@@ -38,7 +36,6 @@ nameserver 8.8.8.8
 nameserver 2606:4700:4700::1111
 nameserver 2001:4860:4860::8888
 EOF
-# 写入完成后重新上锁，防止被系统其他服务篡改
 chattr +i /etc/resolv.conf >/dev/null 2>&1 || true
 
 cat > /etc/sysctl.d/99-bbr.conf << 'EOF'
