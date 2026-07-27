@@ -3,14 +3,14 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-# 接收参数：域名、端口、密码
+# 接收参数定义
 DOMAIN=${1:-}
 ANYTLS_PORT=${2:-443}
 ANYTLS_PASSWORD=${3:-kokonoeyukari}
 GITHUB_API="https://api.github.com/repos/anytls/anytls-go/releases/latest"
 
 echo "=========================================="
-echo " AnyTLS 部署脚本 (CA证书)"
+echo " AnyTLS 双栈安全部署脚本 (CA证书版)"
 echo "=========================================="
 
 if [ "$EUID" -ne 0 ]; then
@@ -20,40 +20,70 @@ fi
 
 if [ -z "$DOMAIN" ]; then
     echo "Error: 缺少域名参数！"
-    echo "用法: bash $0 <你的域名> [端口] [密码]"
-    echo "示例: bash $0 anytls.example.com 443 mypassword123"
+    echo "用法: bash <(curl -sL https://raw.githubusercontent.com/.../anytls) <你的域名> [端口] [密码]"
     exit 1
 fi
 
-echo "正在安装系统依赖..."
+echo "1. 安装依赖..."
 apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar socat >/dev/null 2>&1 || true
+apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar socat ca-certificates >/dev/null 2>&1 || true
 
-echo "正在放行 80 端口用于申请证书..."
-ufw allow 80/tcp >/dev/null 2>&1 || true
+echo "2. 优化网络配置并开启 BBR..."
+cat > /etc/sysctl.d/99-bbr.conf << 'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+sysctl --system >/dev/null 2>&1 || true
 
-echo "正在安装 acme.sh 并申请 CA 证书..."
-curl https://get.acme.sh | sh -s email=admin@${DOMAIN} >/dev/null 2>&1 || true
+echo "3. 配置防火墙..."
+systemctl unmask ufw >/dev/null 2>&1 || true
+systemctl enable --now ufw >/dev/null 2>&1 || true
+ufw --force reset >/dev/null 2>&1 || true
+ufw default deny incoming >/dev/null 2>&1 || true
+ufw default allow outgoing >/dev/null 2>&1 || true
+
+# 尝试获取并放行 SSH 端口，防止失联
+SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config 2>/dev/null | head -1 | awk '{print $2}' || echo "22")
+ufw allow ${SSH_PORT}/tcp comment 'SSH' >/dev/null 2>&1 || true
+
+# 放行 AnyTLS 端口和申请证书需要的 80 端口
+ufw allow 80/tcp comment 'ACME HTTP' >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
+ufw --force enable >/dev/null 2>&1 || true
+ufw reload >/dev/null 2>&1 || true
+
+echo "4. 安装 acme.sh 并申请 CA 证书..."
+# 安装 acme.sh
+curl -sL https://get.acme.sh | sh -s email=admin@${DOMAIN} >/dev/null 2>&1 || true
 ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
 
-# 申请证书 (使用 standalone 模式)
-~/.acme.sh/acme.sh --issue -d ${DOMAIN} --standalone
+# 强制使用独立模式且支持 IPv6 监听（双栈核心！）
+~/.acme.sh/acme.sh --issue -d ${DOMAIN} --standalone --listen-v6
 
-# 安装证书到指定目录
+# 安装证书到 /etc/anytls
 mkdir -p /etc/anytls
 ~/.acme.sh/acme.sh --installcert -d ${DOMAIN} \
     --key-file /etc/anytls/server.key \
     --fullchain-file /etc/anytls/server.crt
 
-echo "获取 AnyTLS 最新版本..."
+echo "5. 获取 AnyTLS 最新版本..."
 case "$(uname -m)" in
     x86_64|amd64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
-    *) echo "不支持的架构"; exit 1 ;;
+    *) echo "不支持的架构: $(uname -m)"; exit 1 ;;
 esac
 
-RELEASE_INFO=$(curl -s --connect-timeout 10 ${GITHUB_API})
-ASSET_URL=$(echo "$RELEASE_INFO" | jq -r ".assets[].browser_download_url" | grep -i "linux" | grep -i "${ARCH}" | grep -v -i "sha256" | head -1 || true)
+RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 ${GITHUB_API})
+VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
+echo "当前 AnyTLS 最新版本: ${VERSION}"
+
+ASSET_URL=$(echo "$RELEASE_INFO" \
+| jq -r ".assets[].browser_download_url" \
+| grep -i "linux" \
+| grep -i "${ARCH}" \
+| grep -v -i "sha256" \
+| head -1 || true)
 
 TMP=$(mktemp -d)
 wget -q -O ${TMP}/anytls.pkg "$ASSET_URL"
@@ -61,10 +91,8 @@ wget -q -O ${TMP}/anytls.pkg "$ASSET_URL"
 rm -f /usr/local/bin/anytls-server
 if [[ "$ASSET_URL" == *.tar.gz ]]; then
     tar -xf ${TMP}/anytls.pkg -C ${TMP}
-elif [[ "$ASSET_URL" == *.zip ]]; then
-    unzip -q -o ${TMP}/anytls.pkg -d ${TMP}
 else
-    cp ${TMP}/anytls.pkg ${TMP}/anytls-server
+    unzip -q -o ${TMP}/anytls.pkg -d ${TMP}
 fi
 
 FILE=$(find ${TMP} -type f -name "anytls-server" | head -1)
@@ -72,16 +100,17 @@ cp "$FILE" /usr/local/bin/anytls-server
 chmod +x /usr/local/bin/anytls-server
 rm -rf ${TMP}
 
-echo "配置 systemd 服务..."
+echo "6. 配置 Systemd 服务..."
+# 注意：[::] 代表同时监听 IPv4 和 IPv6，配合 -c 和 -k 开启真实 CA 证书
 cat > /etc/systemd/system/anytls.service << EOF
 [Unit]
-Description=AnyTLS Server Service (Secure)
+Description=AnyTLS Server Service (Dual Stack & CA)
 After=network.target
 
 [Service]
 Type=simple
 LimitNOFILE=65535
-ExecStart=/usr/local/bin/anytls-server -l 0.0.0.0:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD} -cert /etc/anytls/server.crt -key /etc/anytls/server.key
+ExecStart=/usr/local/bin/anytls-server -l [::]:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD} -cert /etc/anytls/server.crt -key /etc/anytls/server.key
 Restart=on-failure
 RestartSec=3s
 
@@ -94,20 +123,19 @@ systemctl enable anytls >/dev/null 2>&1 || true
 systemctl restart anytls >/dev/null 2>&1 || true
 sleep 2
 
-echo "配置防火墙..."
-ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
-ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
-ufw reload >/dev/null 2>&1 || true
+if ! systemctl is-active --quiet anytls; then
+    echo "AnyTLS 启动失败！请检查证书或端口配置。"
+    exit 1
+fi
 
 echo -e "\n=============================="
-echo " AnyTLS CA证书安全部署完成"
+echo " AnyTLS 双栈 CA 证书部署完成！"
 echo "=============================="
-echo " Domain   : $DOMAIN"
-echo " Port     : $ANYTLS_PORT"
-echo " Password : $ANYTLS_PASSWORD"
-echo " Cert Path: /etc/anytls/server.crt"
-echo " Key Path : /etc/anytls/server.key"
+echo " 节点域名 : $DOMAIN"
+echo " 监听端口 : $ANYTLS_PORT"
+echo " 节点密码 : $ANYTLS_PASSWORD"
+echo " 监听地址 : [::] (支持 IPv4 + IPv6)"
+echo " 证书路径 : /etc/anytls/server.crt"
 echo "=============================="
-echo "安全的客户端 URI 配置："
-echo "anytls://${ANYTLS_PASSWORD}@${DOMAIN}:${ANYTLS_PORT}"
+echo "请在客户端将地址填为：$DOMAIN"
 echo "=============================="
