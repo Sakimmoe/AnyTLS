@@ -5,13 +5,20 @@ export DEBIAN_FRONTEND=noninteractive
 
 ANYTLS_PORT='26216'
 ANYTLS_PASSWORD=''
-NET_MODE=''
+NODE_NAME=''
+WORK_DIR='/etc/anytls'
 GITHUB_API="https://api.github.com/repos/anytls/anytls-go/releases/latest"
 
 info() { echo -e "\033[32m\033[01m$*\033[0m"; }
 hint() { echo -e "\033[33m\033[01m$*\033[0m"; }
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }
 reading() { read -rp "$(info "$1")" "$2"; }
+
+check_system_ip() {
+  IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "")
+  IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || echo "")
+  MAIN_IP=$([ -n "$IPV4" ] && echo "$IPV4" || echo "$IPV6")
+}
 
 echo "=========================================="
 echo " AnyTLS 部署脚本"
@@ -34,7 +41,6 @@ systemctl mask systemd-resolved >/dev/null 2>&1 || true
 
 chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
 rm -f /etc/resolv.conf >/dev/null 2>&1 || true
-
 cat > /etc/resolv.conf << EOF
 nameserver 1.1.1.1
 nameserver 8.8.8.8
@@ -49,10 +55,11 @@ net.ipv4.tcp_congestion_control=bbr
 EOF
 sysctl --system >/dev/null 2>&1 || true
 
-echo "获取服务器 IP..."
-IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org || echo "无")
-IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org || echo "无")
-MAIN_IP=$([ "$IPV4" != "无" ] && echo "$IPV4" || echo "$IPV6")
+check_system_ip
+if [ -z "$MAIN_IP" ]; then
+    warning "无法获取服务器 IP，请检查网络"
+    exit 1
+fi
 
 hint ""
 hint "当前服务器 IP: ${MAIN_IP}"
@@ -66,14 +73,9 @@ DEFAULT_PASSWORD=$(cat /proc/sys/kernel/random/uuid)
 reading "请输入 AnyTLS 密码 [默认: ${DEFAULT_PASSWORD}]: " input_pass
 ANYTLS_PASSWORD=${input_pass:-$DEFAULT_PASSWORD}
 
-reading "请输入网络模式 [默认: 回车=双栈, 输入 4=仅IPv4]: " input_mode
-NET_MODE=${input_mode:-$NET_MODE}
-
-if [ "$NET_MODE" = "4" ]; then
-    LISTEN_ADDR="0.0.0.0"
-else
-    LISTEN_ADDR="[::]"
-fi
+DEFAULT_NAME=$(hostname 2>/dev/null || echo "AnyTLS")
+reading "请输入节点名称 [默认: ${DEFAULT_NAME}]: " input_name
+NODE_NAME=${input_name:-$DEFAULT_NAME}
 
 echo "部署 AnyTLS..."
 systemctl stop anytls >/dev/null 2>&1 || true
@@ -88,20 +90,17 @@ fi
 case "$(uname -m)" in
     x86_64|amd64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
-    *) warning "不支持的架构"; exit 1 ;;
+    *) warning "不支持的架构: $(uname -m)"; exit 1 ;;
 esac
 
 echo "获取 AnyTLS 最新版本..."
-
-RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 ${GITHUB_API})
-
+RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 "${GITHUB_API}")
 VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
 
 if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
     warning "获取版本失败，请检查网络"
     exit 1
 fi
-
 info "当前 AnyTLS 版本: ${VERSION}"
 
 ASSET_URL=$(echo "$RELEASE_INFO" \
@@ -117,33 +116,33 @@ if [ -z "$ASSET_URL" ]; then
 fi
 
 TMP=$(mktemp -d)
-wget --timeout=30 -q -O ${TMP}/anytls.pkg "$ASSET_URL" || {
+wget --timeout=30 -q -O "${TMP}/anytls.pkg" "$ASSET_URL" || {
     warning "AnyTLS 下载失败"
-    rm -rf ${TMP}
+    rm -rf "${TMP}"
     exit 1
 }
 
 rm -f /usr/local/bin/anytls-server
 if [[ "$ASSET_URL" == *.tar.gz ]]; then
-    tar -xf ${TMP}/anytls.pkg -C ${TMP}
+    tar -xf "${TMP}/anytls.pkg" -C "${TMP}"
 elif [[ "$ASSET_URL" == *.zip ]]; then
-    unzip -q -o ${TMP}/anytls.pkg -d ${TMP}
+    unzip -q -o "${TMP}/anytls.pkg" -d "${TMP}"
 else
-    cp ${TMP}/anytls.pkg ${TMP}/anytls-server
+    cp "${TMP}/anytls.pkg" "${TMP}/anytls-server"
 fi
 
-FILE=$(find ${TMP} -type f -name "anytls-server" | head -1)
+FILE=$(find "${TMP}" -type f -name "anytls-server" | head -1)
 if [ -z "$FILE" ]; then
     warning "解压后未找到二进制文件"
-    rm -rf ${TMP}
+    rm -rf "${TMP}"
     exit 1
 fi
 
 cp "$FILE" /usr/local/bin/anytls-server
 chmod +x /usr/local/bin/anytls-server
-rm -rf ${TMP}
+rm -rf "${TMP}"
 
-mkdir -p /etc/anytls
+mkdir -p "${WORK_DIR}"
 
 cat > /etc/systemd/system/anytls.service << EOF
 [Unit]
@@ -153,7 +152,7 @@ After=network.target
 [Service]
 Type=simple
 LimitNOFILE=65535
-ExecStart=/usr/local/bin/anytls-server -l ${LISTEN_ADDR}:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
+ExecStart=/usr/local/bin/anytls-server -l [::]:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
 Restart=on-failure
 RestartSec=3s
 
@@ -191,13 +190,11 @@ if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]]; then
     SSH_PORT=22
 fi
 
-ufw allow 22/tcp comment 'SSH fallback' >/dev/null 2>&1 || true
 ufw allow ${SSH_PORT}/tcp comment 'SSH' >/dev/null 2>&1 || true
 ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
 ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
 ufw --force enable >/dev/null 2>&1 || true
 ufw reload >/dev/null 2>&1 || true
-echo "UFW 配置完成"
 
 echo "配置定时清理..."
 cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
@@ -209,13 +206,30 @@ echo ""
 echo "=============================="
 echo " AnyTLS 部署完成"
 echo "=============================="
-info " IPv4     : $IPV4"
-info " IPv6     : $IPV6"
-info " Port     : $ANYTLS_PORT"
-info " Password : $ANYTLS_PASSWORD"
-info " Version  : $VERSION"
-info " Mode     : $([ "$NET_MODE" = "4" ] && echo "IPv4 Only" || echo "Dual Stack")"
+info " IPv4     : ${IPV4:-无}"
+info " IPv6     : ${IPV6:-无}"
+info " Port     : ${ANYTLS_PORT}"
+info " Password : ${ANYTLS_PASSWORD}"
+info " Version  : ${VERSION}"
 echo "=============================="
-hint "客户端 URI 配置："
-echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:${ANYTLS_PORT}"
+echo ""
+
+if [ -n "$IPV4" ]; then
+    URI_V4="anytls://${ANYTLS_PASSWORD}@${IPV4}:${ANYTLS_PORT}?udp=1#${NODE_NAME// /%20}"
+    hint "【IPv4 节点链接】"
+    echo "$URI_V4"
+    echo ""
+fi
+
+if [ -n "$IPV6" ]; then
+    URI_V6="anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${ANYTLS_PORT}?udp=1#${NODE_NAME// /%20}"
+    hint "【IPv6 节点链接】"
+    echo "$URI_V6"
+    echo ""
+fi
+
+hint "【客户端配置提示】"
+echo "anytls-go 使用内置自签证书，客户端 TLS 请设置为:"
+echo "  insecure: true"
+echo ""
 echo "=============================="
