@@ -6,13 +6,50 @@ export DEBIAN_FRONTEND=noninteractive
 ANYTLS_PORT='26216'
 ANYTLS_PASSWORD=''
 NODE_NAME=''
+TLS_SERVER='addons.mozilla.org'
 WORK_DIR='/etc/anytls'
-GITHUB_API="https://api.github.com/repos/anytls/anytls-go/releases/latest"
+GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 
 info() { echo -e "\033[32m\033[01m$*\033[0m"; }
 hint() { echo -e "\033[33m\033[01m$*\033[0m"; }
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }
 reading() { read -rp "$(info "$1")" "$2"; }
+
+ssl_certificate() {
+  local TLS_SERVER="$1"
+  local CN_DOMAIN
+  CN_DOMAIN=$(awk -F . '{print $(NF-1)"."$NF}' <<< "$TLS_SERVER")
+
+  [ ! -d "${WORK_DIR}/cert" ] && mkdir -p "${WORK_DIR}/cert"
+
+  if [ ! -s "${WORK_DIR}/cert/private.key" ]; then
+    openssl ecparam -genkey -name prime256v1 -out "${WORK_DIR}/cert/private.key"
+  fi
+
+  cat > "${WORK_DIR}/cert/cert.conf" << EOF
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+CN = ${CN_DOMAIN}
+
+[v3_req]
+subjectAltName = @alt_names
+
+[alt_names]
+DNS = ${TLS_SERVER}
+EOF
+
+  openssl req -new -x509 -days 36500 \
+    -key "${WORK_DIR}/cert/private.key" \
+    -out "${WORK_DIR}/cert/cert.pem" \
+    -config "${WORK_DIR}/cert/cert.conf" \
+    -extensions v3_req
+
+  rm -f "${WORK_DIR}/cert/cert.conf"
+}
 
 check_system_ip() {
   IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "")
@@ -21,7 +58,7 @@ check_system_ip() {
 }
 
 echo "=========================================="
-echo " AnyTLS 部署脚本"
+echo " AnyTLS 部署脚本 (sing-box 服务端)"
 echo "=========================================="
 
 if [ "$EUID" -ne 0 ]; then
@@ -31,7 +68,7 @@ fi
 
 echo "安装依赖..."
 apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar >/dev/null 2>&1 || true
+apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar openssl >/dev/null 2>&1 || true
 
 echo "优化网络配置..."
 grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
@@ -77,7 +114,16 @@ DEFAULT_NAME=$(hostname 2>/dev/null || echo "AnyTLS")
 reading "请输入节点名称 [默认: ${DEFAULT_NAME}]: " input_name
 NODE_NAME=${input_name:-$DEFAULT_NAME}
 
-echo "部署 AnyTLS..."
+reading "请输入 SNI 域名 [默认: ${TLS_SERVER}]: " input_sni
+TLS_SERVER=${input_sni:-$TLS_SERVER}
+
+echo "生成自签证书..."
+ssl_certificate "$TLS_SERVER"
+
+SELF_SIGNED_FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${WORK_DIR}/cert/cert.pem" | awk -F '=' '{print $NF}')
+SELF_SIGNED_FINGERPRINT_BASE64=$(openssl x509 -in "${WORK_DIR}/cert/cert.pem" -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64)
+
+echo "部署 sing-box AnyTLS..."
 systemctl stop anytls >/dev/null 2>&1 || true
 sleep 1
 
@@ -93,7 +139,7 @@ case "$(uname -m)" in
     *) warning "不支持的架构: $(uname -m)"; exit 1 ;;
 esac
 
-echo "获取 AnyTLS 最新版本..."
+echo "获取 sing-box 最新版本..."
 RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 "${GITHUB_API}")
 VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
 
@@ -101,13 +147,14 @@ if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
     warning "获取版本失败，请检查网络"
     exit 1
 fi
-info "当前 AnyTLS 版本: ${VERSION}"
+info "当前 sing-box 版本: ${VERSION}"
 
 ASSET_URL=$(echo "$RELEASE_INFO" \
 | jq -r ".assets[].browser_download_url" \
 | grep -i "linux" \
 | grep -i "${ARCH}" \
 | grep -v -i "sha256" \
+| grep -v -i "v3" \
 | head -1 || true)
 
 if [ -z "$ASSET_URL" ]; then
@@ -116,43 +163,76 @@ if [ -z "$ASSET_URL" ]; then
 fi
 
 TMP=$(mktemp -d)
-wget --timeout=30 -q -O "${TMP}/anytls.pkg" "$ASSET_URL" || {
-    warning "AnyTLS 下载失败"
+wget --timeout=30 -q -O "${TMP}/sing-box.pkg" "$ASSET_URL" || {
+    warning "sing-box 下载失败"
     rm -rf "${TMP}"
     exit 1
 }
 
-rm -f /usr/local/bin/anytls-server
+rm -f /usr/local/bin/sing-box
 if [[ "$ASSET_URL" == *.tar.gz ]]; then
-    tar -xf "${TMP}/anytls.pkg" -C "${TMP}"
+    tar -xf "${TMP}/sing-box.pkg" -C "${TMP}"
 elif [[ "$ASSET_URL" == *.zip ]]; then
-    unzip -q -o "${TMP}/anytls.pkg" -d "${TMP}"
+    unzip -q -o "${TMP}/sing-box.pkg" -d "${TMP}"
 else
-    cp "${TMP}/anytls.pkg" "${TMP}/anytls-server"
+    cp "${TMP}/sing-box.pkg" "${TMP}/sing-box"
 fi
 
-FILE=$(find "${TMP}" -type f -name "anytls-server" | head -1)
+FILE=$(find "${TMP}" -type f -name "sing-box" | head -1)
 if [ -z "$FILE" ]; then
     warning "解压后未找到二进制文件"
     rm -rf "${TMP}"
     exit 1
 fi
 
-cp "$FILE" /usr/local/bin/anytls-server
-chmod +x /usr/local/bin/anytls-server
+cp "$FILE" /usr/local/bin/sing-box
+chmod +x /usr/local/bin/sing-box
 rm -rf "${TMP}"
 
 mkdir -p "${WORK_DIR}"
 
+cat > "${WORK_DIR}/config.json" << EOF
+{
+    "log": {
+        "level": "warn"
+    },
+    "inbounds": [
+        {
+            "type": "anytls",
+            "tag": "anytls-in",
+            "listen": "::",
+            "listen_port": ${ANYTLS_PORT},
+            "users": [
+                {
+                    "password": "${ANYTLS_PASSWORD}"
+                }
+            ],
+            "padding_scheme": [],
+            "tls": {
+                "enabled": true,
+                "certificate_path": "${WORK_DIR}/cert/cert.pem",
+                "key_path": "${WORK_DIR}/cert/private.key"
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct"
+        }
+    ]
+}
+EOF
+
 cat > /etc/systemd/system/anytls.service << EOF
 [Unit]
-Description=AnyTLS Server Service
+Description=AnyTLS Server (sing-box)
 After=network.target
 
 [Service]
 Type=simple
 LimitNOFILE=65535
-ExecStart=/usr/local/bin/anytls-server -l [::]:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
+ExecStart=/usr/local/bin/sing-box run -c ${WORK_DIR}/config.json
 Restart=on-failure
 RestartSec=3s
 
@@ -210,26 +290,47 @@ info " IPv4     : ${IPV4:-无}"
 info " IPv6     : ${IPV6:-无}"
 info " Port     : ${ANYTLS_PORT}"
 info " Password : ${ANYTLS_PASSWORD}"
+info " SNI      : ${TLS_SERVER}"
 info " Version  : ${VERSION}"
 echo "=============================="
 echo ""
 
 if [ -n "$IPV4" ]; then
-    URI_V4="anytls://${ANYTLS_PASSWORD}@${IPV4}:${ANYTLS_PORT}?udp=1#${NODE_NAME// /%20}"
+    URI_V4="anytls://${ANYTLS_PASSWORD}@${IPV4}:${ANYTLS_PORT}?peer=${TLS_SERVER}&udp=1&hpkp=${SELF_SIGNED_FINGERPRINT_SHA256}#${NODE_NAME// /%20}"
     hint "【IPv4 节点链接】"
     echo "$URI_V4"
     echo ""
 fi
 
 if [ -n "$IPV6" ]; then
-    URI_V6="anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${ANYTLS_PORT}?udp=1#${NODE_NAME// /%20}"
+    URI_V6="anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${ANYTLS_PORT}?peer=${TLS_SERVER}&udp=1&hpkp=${SELF_SIGNED_FINGERPRINT_SHA256}#${NODE_NAME// /%20}"
     hint "【IPv6 节点链接】"
     echo "$URI_V6"
     echo ""
 fi
 
-hint "【客户端配置提示】"
-echo "anytls-go 使用内置自签证书，客户端 TLS 请设置为:"
-echo "  insecure: true"
+hint "【Sing-box 客户端 outbound 配置】"
+cat << EOF
+{
+    "type": "anytls",
+    "tag": "${NODE_NAME}",
+    "server": "${MAIN_IP}",
+    "server_port": ${ANYTLS_PORT},
+    "password": "${ANYTLS_PASSWORD}",
+    "idle_session_check_interval": "30s",
+    "idle_session_timeout": "30s",
+    "min_idle_session": 5,
+    "tls": {
+        "enabled": true,
+        "certificate_public_key_sha256": ["${SELF_SIGNED_FINGERPRINT_BASE64}"],
+        "server_name": "${TLS_SERVER}",
+        "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+        }
+    }
+}
+EOF
+
 echo ""
 echo "=============================="
