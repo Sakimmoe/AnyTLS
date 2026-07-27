@@ -3,17 +3,22 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-ANYTLS_PORT=${1:-26216}
-ANYTLS_PASSWORD=${2:-kokonoeyukari}
-NET_MODE=${3:-}
+ANYTLS_PORT='26216'
+ANYTLS_PASSWORD=''
+NET_MODE=''
 GITHUB_API="https://api.github.com/repos/anytls/anytls-go/releases/latest"
+
+info() { echo -e "\033[32m\033[01m$*\033[0m"; }
+hint() { echo -e "\033[33m\033[01m$*\033[0m"; }
+warning() { echo -e "\033[31m\033[01m$*\033[0m"; }
+reading() { read -rp "$(info "$1")" "$2"; }
 
 echo "=========================================="
 echo " AnyTLS 部署脚本"
 echo "=========================================="
 
 if [ "$EUID" -ne 0 ]; then
-    echo "Error: 请使用 root 用户运行"
+    warning "Error: 请使用 root 用户运行"
     exit 1
 fi
 
@@ -49,6 +54,21 @@ IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org || echo "无")
 IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org || echo "无")
 MAIN_IP=$([ "$IPV4" != "无" ] && echo "$IPV4" || echo "$IPV6")
 
+hint ""
+hint "当前服务器 IP: ${MAIN_IP}"
+hint "以下配置直接按回车将使用默认值"
+hint ""
+
+reading "请输入 AnyTLS 端口 [默认: 26216]: " input_port
+ANYTLS_PORT=${input_port:-$ANYTLS_PORT}
+
+DEFAULT_PASSWORD=$(cat /proc/sys/kernel/random/uuid)
+reading "请输入 AnyTLS 密码 [默认: ${DEFAULT_PASSWORD}]: " input_pass
+ANYTLS_PASSWORD=${input_pass:-$DEFAULT_PASSWORD}
+
+reading "请输入网络模式 [默认: 回车=双栈, 输入 4=仅IPv4]: " input_mode
+NET_MODE=${input_mode:-$NET_MODE}
+
 if [ "$NET_MODE" = "4" ]; then
     LISTEN_ADDR="0.0.0.0"
 else
@@ -60,7 +80,7 @@ systemctl stop anytls >/dev/null 2>&1 || true
 sleep 1
 
 if ss -tlnp | grep -q ":${ANYTLS_PORT} "; then
-    echo "端口 ${ANYTLS_PORT} 已被占用"
+    warning "端口 ${ANYTLS_PORT} 已被占用"
     ss -tlnp | grep ":${ANYTLS_PORT} "
     exit 1
 fi
@@ -68,7 +88,7 @@ fi
 case "$(uname -m)" in
     x86_64|amd64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
-    *) echo "不支持的架构"; exit 1 ;;
+    *) warning "不支持的架构"; exit 1 ;;
 esac
 
 echo "获取 AnyTLS 最新版本..."
@@ -78,11 +98,11 @@ RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 ${GITHUB_API})
 VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
 
 if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-    echo "获取版本失败，请检查网络"
+    warning "获取版本失败，请检查网络"
     exit 1
 fi
 
-echo "当前 AnyTLS 版本: ${VERSION}"
+info "当前 AnyTLS 版本: ${VERSION}"
 
 ASSET_URL=$(echo "$RELEASE_INFO" \
 | jq -r ".assets[].browser_download_url" \
@@ -92,13 +112,13 @@ ASSET_URL=$(echo "$RELEASE_INFO" \
 | head -1 || true)
 
 if [ -z "$ASSET_URL" ]; then
-    echo "未找到适用于 Linux ${ARCH} 的下载文件"
+    warning "未找到适用于 Linux ${ARCH} 的下载文件"
     exit 1
 fi
 
 TMP=$(mktemp -d)
 wget --timeout=30 -q -O ${TMP}/anytls.pkg "$ASSET_URL" || {
-    echo "AnyTLS 下载失败"
+    warning "AnyTLS 下载失败"
     rm -rf ${TMP}
     exit 1
 }
@@ -114,7 +134,7 @@ fi
 
 FILE=$(find ${TMP} -type f -name "anytls-server" | head -1)
 if [ -z "$FILE" ]; then
-    echo "解压后未找到二进制文件"
+    warning "解压后未找到二进制文件"
     rm -rf ${TMP}
     exit 1
 fi
@@ -147,7 +167,7 @@ systemctl restart anytls >/dev/null 2>&1 || true
 sleep 2
 
 if ! systemctl is-active --quiet anytls; then
-    echo "AnyTLS 启动失败"
+    warning "AnyTLS 启动失败"
     journalctl -u anytls -n 20 --no-pager
     exit 1
 fi
@@ -185,16 +205,17 @@ cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
 CRONEOF
 chmod 644 /etc/cron.d/anytls-cleanup
 
-echo -e "\n=============================="
+echo ""
+echo "=============================="
 echo " AnyTLS 部署完成"
 echo "=============================="
-echo " IPv4     : $IPV4"
-echo " IPv6     : $IPV6"
-echo " Port     : $ANYTLS_PORT"
-echo " Password : $ANYTLS_PASSWORD"
-echo " Version  : $VERSION"
-echo " Mode     : $([ "$NET_MODE" = "4" ] && echo "IPv4 Only" || echo "Dual Stack")"
+info " IPv4     : $IPV4"
+info " IPv6     : $IPV6"
+info " Port     : $ANYTLS_PORT"
+info " Password : $ANYTLS_PASSWORD"
+info " Version  : $VERSION"
+info " Mode     : $([ "$NET_MODE" = "4" ] && echo "IPv4 Only" || echo "Dual Stack")"
 echo "=============================="
-echo "客户端 URI 配置："
+hint "客户端 URI 配置："
 echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:${ANYTLS_PORT}"
 echo "=============================="
