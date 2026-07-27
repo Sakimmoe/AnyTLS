@@ -17,6 +17,9 @@ reading() { read -rp "$(info "$1")" "$2"; }
 
 ssl_certificate() {
   local TLS_SERVER="$1"
+  local CN_DOMAIN
+  CN_DOMAIN=$(awk -F . '{print $(NF-1)"."$NF}' <<< "$TLS_SERVER")
+
   [ ! -d "${WORK_DIR}/cert" ] && mkdir -p "${WORK_DIR}/cert"
 
   if [ ! -s "${WORK_DIR}/cert/private.key" ]; then
@@ -30,7 +33,7 @@ x509_extensions = v3_req
 prompt = no
 
 [req_distinguished_name]
-CN = $(awk -F . '{print $(NF-1)".$NF}' <<< "$TLS_SERVER")
+CN = ${CN_DOMAIN}
 
 [v3_req]
 subjectAltName = @alt_names
@@ -151,6 +154,7 @@ ASSET_URL=$(echo "$RELEASE_INFO" \
 | grep -i "linux" \
 | grep -i "${ARCH}" \
 | grep -v -i "sha256" \
+| grep -v -i "v3" \
 | head -1 || true)
 
 if [ -z "$ASSET_URL" ]; then
