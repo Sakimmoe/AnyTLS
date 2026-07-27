@@ -282,6 +282,9 @@ cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
 CRONEOF
 chmod 644 /etc/cron.d/anytls-cleanup
 
+# 获取 sing-box 完整版本信息（含编译信息）
+SINGBOX_FULL_VERSION=$(/usr/local/bin/sing-box version 2>/dev/null | head -n 1 || echo "unknown")
+
 echo ""
 echo "=============================="
 echo " AnyTLS 部署完成"
@@ -291,7 +294,8 @@ info " IPv6     : ${IPV6:-无}"
 info " Port     : ${ANYTLS_PORT}"
 info " Password : ${ANYTLS_PASSWORD}"
 info " SNI      : ${TLS_SERVER}"
-info " Version  : ${VERSION}"
+info " sing-box : ${SINGBOX_FULL_VERSION}"
+info " AnyTLS   : 内置协议 (版本与 sing-box 一致)"
 echo "=============================="
 echo ""
 
