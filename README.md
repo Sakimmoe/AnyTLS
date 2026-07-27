@@ -55,7 +55,7 @@ bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls-go
 ==========================================
 
 当前服务器 IP:
-103.97.200.11
+100.97.200.10
 
 以下配置直接按回车将使用默认值
 
