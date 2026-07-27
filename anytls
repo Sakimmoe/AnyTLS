@@ -3,18 +3,32 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
+# ---------- 参数解析 ----------
 ANYTLS_PORT=${1:-26216}
 ANYTLS_PASSWORD=${2:-kokonoeyukari}
-NET_MODE=${3:-}
+NET_MODE_RAW=${3:-}
 EMAIL=${4:-}
 DOMAIN=${5:-}
+
+# 规范化 NET_MODE（大小写不敏感，支持 dual/ipv4/ipv6/4/6）
+NET_MODE=$(echo "$NET_MODE_RAW" | tr '[:upper:]' '[:lower:]')
+case "$NET_MODE" in
+    dual)   NET_MODE="dual" ;;
+    4|ipv4) NET_MODE="4" ;;
+    6|ipv6) NET_MODE="6" ;;
+    "")     NET_MODE="" ;;   # 默认双栈
+    *)
+        echo "错误: 网络模式只能是 dual / ipv4 / ipv6 (或 4 / 6)"
+        exit 1
+        ;;
+esac
+
 GITHUB_API="https://api.github.com/repos/anytls/anytls-go/releases/latest"
 
 echo "=========================================="
 echo " AnyTLS TLS 证书 + 双节点部署脚本"
 echo "=========================================="
 
-# ---------- 参数检查 ----------
 if [ "$EUID" -ne 0 ]; then
     echo "Error: 请使用 root 用户运行"
     exit 1
@@ -23,7 +37,7 @@ fi
 if [ -z "$EMAIL" ] || [ -z "$DOMAIN" ]; then
     echo "Error: 必须提供邮箱和域名"
     echo "用法：$0 [端口] [密码] [模式] 邮箱 域名"
-    echo "示例：$0 26216 mypass dual my@mail.com zouterhklite.yukari.icu"
+    echo "示例：$0 26216 mypass dual my@mail.com my.domain.com"
     exit 1
 fi
 
@@ -32,21 +46,17 @@ if ! echo "$EMAIL" | grep -qE "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
     exit 1
 fi
 
-# ---------- 依赖安装 ----------
 echo "1. 安装依赖..."
-apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar socat >/dev/null 2>&1 || true
+apt-get update -qq
+apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar socat
 
-# ---------- 网络优化 ----------
 echo "2. 网络优化 & BBR..."
 grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
 
 systemctl disable systemd-resolved --now >/dev/null 2>&1 || true
 systemctl mask systemd-resolved >/dev/null 2>&1 || true
-
 chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
-rm -f /etc/resolv.conf >/dev/null 2>&1 || true
-
+rm -f /etc/resolv.conf
 cat > /etc/resolv.conf << EOF
 nameserver 1.1.1.1
 nameserver 8.8.8.8
@@ -59,9 +69,8 @@ cat > /etc/sysctl.d/99-bbr.conf << 'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
-sysctl --system >/dev/null 2>&1 || true
+sysctl --system >/dev/null 2>&1
 
-# ---------- 获取 IP ----------
 echo "3. 检测服务器 IP..."
 IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org || echo "无")
 IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org || echo "无")
@@ -76,37 +85,32 @@ else
     DEPLOY_DUAL=false
     if [ "$NET_MODE" = "4" ]; then
         LISTEN_ADDR="0.0.0.0"
+        echo "纯 IPv4 模式"
     elif [ "$NET_MODE" = "6" ]; then
         LISTEN_ADDR="[::]"
-        # 纯 IPv6 需要服务文件里加 -6 选项吗？anytls 可能支持直接监听 [::] 并开启 IPV6_V6ONLY
-        # 保险起见我们后面在 ExecStart 中加上 -6 标志（如果程序支持的话，否则用系统参数）
-        # 这里先默认不加，因为 anytls 似乎没有 -6 选项，我们通过绑定 ::1 无法做到纯 ipv6，实际双栈 [::] 也会接受 v4
-        # 因此纯 IPv6 模式在这里只是监听 [::]，如果服务器没有 v4，客户端自然只能用 v6 连接。
-        # 保持简单。
-        LISTEN_ADDR="[::]"
+        echo "纯 IPv6 模式"
     else
         LISTEN_ADDR="[::]"
+        echo "双栈模式 (监听 [::])"
     fi
 fi
 
 # ---------- 安装 acme.sh ----------
 echo "4. 安装 acme.sh..."
 curl -s https://get.acme.sh | sh -s email="$EMAIL"
-source ~/.bashrc
 export PATH="$HOME/.acme.sh:$PATH"
+[ -f ~/.bashrc ] && source ~/.bashrc
 
 # ---------- 申请证书 ----------
 echo "5. 申请 Let's Encrypt 证书（域名: $DOMAIN）..."
-# 先停止可能占用 80 端口的服务（nginx, apache2 等）
-systemctl stop nginx 2>/dev/null || true
-systemctl stop apache2 2>/dev/null || true
+# 停止可能占用 80 端口的服务
+systemctl stop nginx apache2 2>/dev/null || true
 
 ~/.acme.sh/acme.sh --issue --standalone -d "$DOMAIN" \
     --email "$EMAIL" \
     --keylength ec-256 \
-    --force  # 强制申请，防止之前残留状态
+    --force
 
-# 安装证书到指定目录
 CERT_DIR="/etc/anytls/certs"
 mkdir -p "$CERT_DIR"
 ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
@@ -119,12 +123,9 @@ echo "证书已安装至: $CERT_DIR"
 
 # ---------- 下载 anytls ----------
 echo "6. 部署 AnyTLS..."
-systemctl stop anytls 2>/dev/null || true
-systemctl stop anytls4 2>/dev/null || true
-systemctl stop anytls6 2>/dev/null || true
+systemctl stop anytls anytls4 anytls6 2>/dev/null || true
 sleep 1
 
-# 端口占用检查
 check_port() {
     if ss -tlnp | grep -q ":${1} "; then
         echo "Error: 端口 ${1} 已被占用"
@@ -147,8 +148,7 @@ esac
 
 echo "获取 AnyTLS 最新版本..."
 RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 ${GITHUB_API})
-VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
-
+VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name')
 if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
     echo "获取版本失败，请检查网络"
     exit 1
@@ -158,7 +158,6 @@ echo "当前 AnyTLS 版本: ${VERSION}"
 BASE_URL="https://github.com/anytls/anytls-go/releases/download/${VERSION}"
 TMP=$(mktemp -d)
 DOWNLOAD_SUCCESS=false
-
 echo "尝试下载 anytls-server-linux-${ARCH}.tar.gz ..."
 if wget --timeout=30 -q -O "${TMP}/anytls.tar.gz" "${BASE_URL}/anytls-server-linux-${ARCH}.tar.gz"; then
     tar -xzf "${TMP}/anytls.tar.gz" -C "${TMP}"
@@ -170,7 +169,6 @@ else
         DOWNLOAD_SUCCESS=true
     fi
 fi
-
 if [ "$DOWNLOAD_SUCCESS" = false ]; then
     echo "AnyTLS 下载失败"
     rm -rf "${TMP}"
@@ -183,16 +181,14 @@ if [ -z "$FILE" ]; then
     rm -rf "${TMP}"
     exit 1
 fi
-
 cp "$FILE" /usr/local/bin/anytls-server
 chmod +x /usr/local/bin/anytls-server
 rm -rf "${TMP}"
 
-# ---------- 创建 systemd 服务 ----------
+# ---------- systemd 服务 ----------
 CERT_OPTS="-c $CERT_DIR/fullchain.crt -k $CERT_DIR/private.key"
 
 if $DEPLOY_DUAL; then
-    # IPv4 服务
     cat > /etc/systemd/system/anytls4.service << EOF
 [Unit]
 Description=AnyTLS IPv4 Service
@@ -209,7 +205,6 @@ RestartSec=3s
 WantedBy=multi-user.target
 EOF
 
-    # IPv6 服务
     cat > /etc/systemd/system/anytls6.service << EOF
 [Unit]
 Description=AnyTLS IPv6 Service
@@ -227,20 +222,12 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable anytls4 anytls6 >/dev/null 2>&1 || true
-    systemctl restart anytls4 anytls6 >/dev/null 2>&1 || true
+    systemctl enable anytls4 anytls6
+    systemctl restart anytls4 anytls6
     sleep 2
 
-    if ! systemctl is-active --quiet anytls4; then
-        echo "AnyTLS IPv4 启动失败，查看日志：journalctl -u anytls4 -n 20"
-        journalctl -u anytls4 -n 20 --no-pager
-        exit 1
-    fi
-    if ! systemctl is-active --quiet anytls6; then
-        echo "AnyTLS IPv6 启动失败，查看日志：journalctl -u anytls6 -n 20"
-        journalctl -u anytls6 -n 20 --no-pager
-        exit 1
-    fi
+    systemctl is-active --quiet anytls4 || { echo "IPv4 服务启动失败"; journalctl -u anytls4 -n 20 --no-pager; exit 1; }
+    systemctl is-active --quiet anytls6 || { echo "IPv6 服务启动失败"; journalctl -u anytls6 -n 20 --no-pager; exit 1; }
 else
     cat > /etc/systemd/system/anytls.service << EOF
 [Unit]
@@ -259,52 +246,38 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable anytls >/dev/null 2>&1 || true
-    systemctl restart anytls >/dev/null 2>&1 || true
+    systemctl enable anytls
+    systemctl restart anytls
     sleep 2
-
-    if ! systemctl is-active --quiet anytls; then
-        echo "AnyTLS 启动失败，查看日志：journalctl -u anytls -n 20"
-        journalctl -u anytls -n 20 --no-pager
-        exit 1
-    fi
+    systemctl is-active --quiet anytls || { echo "AnyTLS 启动失败"; journalctl -u anytls -n 20 --no-pager; exit 1; }
 fi
 
 # ---------- 防火墙 ----------
 echo "7. 配置防火墙..."
 systemctl unmask ufw >/dev/null 2>&1 || true
 systemctl enable --now ufw >/dev/null 2>&1 || true
-
-ufw --force reset >/dev/null 2>&1 || true
-ufw default deny incoming >/dev/null 2>&1 || true
-ufw default allow outgoing >/dev/null 2>&1 || true
+ufw --force reset
+ufw default deny incoming
+ufw default allow outgoing
 
 SSH_PORT=""
-if [ -f /etc/ssh/sshd_config ]; then
-    SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config | head -1 | awk '{print $2}' | tr -d '\r\n' || true)
-fi
-if [ -z "$SSH_PORT" ] && [ -d /etc/ssh/sshd_config.d ]; then
-    SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config.d/*.conf 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r\n' || true)
-fi
-if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]]; then
-    SSH_PORT=22
-fi
+[ -f /etc/ssh/sshd_config ] && SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config | head -1 | awk '{print $2}')
+[ -z "$SSH_PORT" ] && [ -d /etc/ssh/sshd_config.d ] && SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config.d/*.conf 2>/dev/null | head -1 | awk '{print $2}')
+[[ "$SSH_PORT" =~ ^[0-9]+$ ]] || SSH_PORT=22
 
-ufw allow 22/tcp comment 'SSH fallback' >/dev/null 2>&1 || true
-ufw allow ${SSH_PORT}/tcp comment 'SSH' >/dev/null 2>&1 || true
-
+ufw allow 22/tcp comment 'SSH fallback'
+ufw allow ${SSH_PORT}/tcp comment 'SSH'
 if $DEPLOY_DUAL; then
-    ufw allow ${V4_PORT}/tcp comment 'AnyTLS IPv4 TCP' >/dev/null 2>&1 || true
-    ufw allow ${V4_PORT}/udp comment 'AnyTLS IPv4 UDP' >/dev/null 2>&1 || true
-    ufw allow ${V6_PORT}/tcp comment 'AnyTLS IPv6 TCP' >/dev/null 2>&1 || true
-    ufw allow ${V6_PORT}/udp comment 'AnyTLS IPv6 UDP' >/dev/null 2>&1 || true
+    ufw allow ${V4_PORT}/tcp comment 'AnyTLS IPv4'
+    ufw allow ${V4_PORT}/udp comment 'AnyTLS IPv4 UDP'
+    ufw allow ${V6_PORT}/tcp comment 'AnyTLS IPv6'
+    ufw allow ${V6_PORT}/udp comment 'AnyTLS IPv6 UDP'
 else
-    ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
-    ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
+    ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS'
+    ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP'
 fi
-
-ufw --force enable >/dev/null 2>&1 || true
-ufw reload >/dev/null 2>&1 || true
+ufw --force enable
+ufw reload
 
 # ---------- 定时清理 ----------
 echo "8. 配置定时清理..."
@@ -313,9 +286,9 @@ cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
 CRONEOF
 chmod 644 /etc/cron.d/anytls-cleanup
 
-# ---------- 输出信息 ----------
+# ---------- 最终信息 ----------
 echo -e "\n=============================="
-echo " AnyTLS TLS 部署完成"
+echo " AnyTLS TLS 部署成功"
 echo "=============================="
 echo " 版本     : $VERSION"
 echo " 证书     : $DOMAIN"
@@ -332,7 +305,7 @@ if $DEPLOY_DUAL; then
     echo " 端口     : $V6_PORT"
     echo " URI      : anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${V6_PORT}"
     echo "------------------------------"
-    echo " 域名节点 (需 A/AAAA 记录均指向本机)"
+    echo " 域名节点 (需 A/AAAA 均指向本机)"
     echo " 域名     : $DOMAIN"
     echo " 节点1    : anytls://${ANYTLS_PASSWORD}@${DOMAIN}:${V4_PORT}"
     echo " 节点2    : anytls://${ANYTLS_PASSWORD}@${DOMAIN}:${V6_PORT}"
