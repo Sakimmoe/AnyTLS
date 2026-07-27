@@ -3,83 +3,22 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-# ==========================================
-# 默认值（不想交互直接回车就行）
-# ==========================================
-ANYTLS_PORT='26216'
-ANYTLS_PASSWORD=''
-NODE_NAME=''
-TLS_SERVER='addons.mozilla.org'
-WORK_DIR='/etc/anytls'
+ANYTLS_PORT=${1:-26216}
+ANYTLS_PASSWORD=${2:-kokonoeyukari}
+NET_MODE=${3:-}
 GITHUB_API="https://api.github.com/repos/anytls/anytls-go/releases/latest"
 
-# 颜色输出（从 sing-box.sh 提取）
 info() { echo -e "\033[32m\033[01m$*\033[0m"; }
-hint() { echo -e "\033[33m\033[01m$*\033[0m"; }
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }
-reading() { read -rp "$(info "$1")" "$2"; }
-
-# ==========================================
-# 生成自签证书（从 sing-box.sh 提取）
-# ==========================================
-ssl_certificate() {
-  local TLS_SERVER="$1"
-  [ ! -d "${WORK_DIR}/cert" ] && mkdir -p "${WORK_DIR}/cert"
-  
-  if [ ! -s "${WORK_DIR}/cert/private.key" ]; then
-    openssl ecparam -genkey -name prime256v1 -out "${WORK_DIR}/cert/private.key"
-  fi
-
-  cat > "${WORK_DIR}/cert/cert.conf" << EOF
-[req]
-distinguished_name = req_distinguished_name
-x509_extensions = v3_req
-prompt = no
-
-[req_distinguished_name]
-CN = $(awk -F . '{print $(NF-1)"."$NF}' <<< "$TLS_SERVER")
-
-[v3_req]
-subjectAltName = @alt_names
-
-[alt_names]
-DNS = ${TLS_SERVER}
-EOF
-
-  openssl req -new -x509 -days 36500 \
-    -key "${WORK_DIR}/cert/private.key" \
-    -out "${WORK_DIR}/cert/cert.pem" \
-    -config "${WORK_DIR}/cert/cert.conf" \
-    -extensions v3_req
-
-  rm -f "${WORK_DIR}/cert/cert.conf"
-}
-
-# ==========================================
-# 获取服务器 IP
-# ==========================================
-check_system_ip() {
-  IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "")
-  IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || echo "")
-  MAIN_IP=$([ -n "$IPV4" ] && echo "$IPV4" || echo "$IPV6")
-}
-
-# ==========================================
-# 主流程
-# ==========================================
-echo "=========================================="
-echo " AnyTLS 部署脚本"
-echo "=========================================="
 
 if [ "$EUID" -ne 0 ]; then
     warning "Error: 请使用 root 用户运行"
     exit 1
 fi
 
-# 1. 系统优化（保留你原脚本的精华）
 echo "安装依赖..."
 apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar openssl >/dev/null 2>&1 || true
+apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar >/dev/null 2>&1 || true
 
 echo "优化网络配置..."
 grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
@@ -103,44 +42,18 @@ net.ipv4.tcp_congestion_control=bbr
 EOF
 sysctl --system >/dev/null 2>&1 || true
 
-# 2. 获取 IP
-check_system_ip
-if [ -z "$MAIN_IP" ]; then
-    warning "无法获取服务器 IP，请检查网络"
-    exit 1
+echo "获取服务器 IP..."
+IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "无")
+IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || echo "无")
+MAIN_IP=$([ "$IPV4" != "无" ] && echo "$IPV4" || echo "$IPV6")
+
+if [ "$NET_MODE" = "4" ]; then
+    LISTEN_ADDR="0.0.0.0"
+else
+    LISTEN_ADDR="[::]"
 fi
 
-# 3. 交互式输入（带默认值，直接回车即可）
-hint ""
-hint "当前服务器 IP: ${MAIN_IP}"
-hint "以下配置直接按回车将使用默认值"
-hint ""
-
-reading "请输入 AnyTLS 端口 [默认: 26216]: " input_port
-ANYTLS_PORT=${input_port:-$ANYTLS_PORT}
-
-# 自动生成 UUID 作为默认密码
-DEFAULT_PASSWORD=$(cat /proc/sys/kernel/random/uuid)
-reading "请输入 AnyTLS 密码 [默认: ${DEFAULT_PASSWORD}]: " input_pass
-ANYTLS_PASSWORD=${input_pass:-$DEFAULT_PASSWORD}
-
-DEFAULT_NAME=$(hostname 2>/dev/null || echo "AnyTLS")
-reading "请输入节点名称 [默认: ${DEFAULT_NAME}]: " input_name
-NODE_NAME=${input_name:-$DEFAULT_NAME}
-
-reading "请输入 Reality/SNI 域名 [默认: ${TLS_SERVER}]: " input_sni
-TLS_SERVER=${input_sni:-$TLS_SERVER}
-
-# 4. 生成自签证书（从 sing-box.sh 提取的核心逻辑）
-echo "生成自签证书..."
-ssl_certificate "$TLS_SERVER"
-
-# 计算证书指纹（用于客户端验证）
-SELF_SIGNED_FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${WORK_DIR}/cert/cert.pem" | awk -F '=' '{print $NF}')
-SELF_SIGNED_FINGERPRINT_BASE64=$(openssl x509 -in "${WORK_DIR}/cert/cert.pem" -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64)
-
-# 5. 部署 AnyTLS
-echo "部署 AnyTLS..."
+echo "停止旧服务..."
 systemctl stop anytls >/dev/null 2>&1 || true
 sleep 1
 
@@ -157,7 +70,7 @@ case "$(uname -m)" in
 esac
 
 echo "获取 AnyTLS 最新版本..."
-RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 ${GITHUB_API})
+RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 "${GITHUB_API}")
 VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
 
 if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
@@ -181,7 +94,7 @@ fi
 TMP=$(mktemp -d)
 wget --timeout=30 -q -O "${TMP}/anytls.pkg" "$ASSET_URL" || {
     warning "AnyTLS 下载失败"
-    rm -rf ${TMP}
+    rm -rf "${TMP}"
     exit 1
 }
 
@@ -205,24 +118,8 @@ cp "$FILE" /usr/local/bin/anytls-server
 chmod +x /usr/local/bin/anytls-server
 rm -rf "${TMP}"
 
-# 6. 检测 anytls-server 支持的 TLS 参数名（自动适配）
-echo "检测 anytls-server TLS 参数..."
-TLS_ARGS=""
-HELP_TEXT=$(/usr/local/bin/anytls-server -h 2>&1 || true)
+mkdir -p /etc/anytls
 
-if echo "$HELP_TEXT" | grep -qE '\-\-cert'; then
-    TLS_ARGS="--cert ${WORK_DIR}/cert/cert.pem --key ${WORK_DIR}/cert/private.key"
-elif echo "$HELP_TEXT" | grep -qE '\-cert'; then
-    TLS_ARGS="-cert ${WORK_DIR}/cert/cert.pem -key ${WORK_DIR}/cert/private.key"
-elif echo "$HELP_TEXT" | grep -qE '\-\-tls-cert'; then
-    TLS_ARGS="--tls-cert ${WORK_DIR}/cert/cert.pem --tls-key ${WORK_DIR}/cert/private.key"
-else
-    warning "警告: anytls-server 可能不支持 TLS 参数，将以明文方式运行"
-    warning "如需 TLS，请检查 anytls-server 帮助: anytls-server -h"
-fi
-
-# 7. 配置 systemd
-mkdir -p "${WORK_DIR}"
 cat > /etc/systemd/system/anytls.service << EOF
 [Unit]
 Description=AnyTLS Server Service
@@ -231,7 +128,7 @@ After=network.target
 [Service]
 Type=simple
 LimitNOFILE=65535
-ExecStart=/usr/local/bin/anytls-server -l [::]:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD} ${TLS_ARGS}
+ExecStart=/usr/local/bin/anytls-server -l ${LISTEN_ADDR}:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
 Restart=on-failure
 RestartSec=3s
 
@@ -250,7 +147,6 @@ if ! systemctl is-active --quiet anytls; then
     exit 1
 fi
 
-# 8. 防火墙配置
 echo "配置防火墙..."
 systemctl unmask ufw >/dev/null 2>&1 || true
 systemctl enable --now ufw >/dev/null 2>&1 || true
@@ -270,73 +166,31 @@ if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]]; then
     SSH_PORT=22
 fi
 
-ufw allow ${SSH_PORT}/tcp comment 'SSH' >/dev/null 2>&1 || true
-ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
-ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
+ufw allow 22/tcp comment 'SSH fallback' >/dev/null 2>&1 || true
+ufw allow "${SSH_PORT}"/tcp comment 'SSH' >/dev/null 2>&1 || true
+ufw allow "${ANYTLS_PORT}"/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
+ufw allow "${ANYTLS_PORT}"/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
 ufw --force enable >/dev/null 2>&1 || true
 ufw reload >/dev/null 2>&1 || true
+echo "UFW 配置完成"
 
-# 9. 定时清理（保留原脚本）
 echo "配置定时清理..."
 cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
 7 7 * * 0 root /bin/bash -c 'apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete' >/dev/null 2>&1
 CRONEOF
 chmod 644 /etc/cron.d/anytls-cleanup
 
-# ==========================================
-# 10. 节点信息输出（从 sing-box.sh 提取格式）
-# ==========================================
 echo ""
 echo "=============================="
 echo " AnyTLS 部署完成"
 echo "=============================="
-info " IPv4     : ${IPV4:-无}"
-info " IPv6     : ${IPV6:-无}"
-info " Port     : ${ANYTLS_PORT}"
-info " Password : ${ANYTLS_PASSWORD}"
-info " SNI      : ${TLS_SERVER}"
-info " Version  : ${VERSION}"
+echo " IPv4     : $IPV4"
+echo " IPv6     : $IPV6"
+echo " Port     : $ANYTLS_PORT"
+echo " Password : $ANYTLS_PASSWORD"
+echo " Version  : ${VERSION}"
+echo " Mode     : $([ "$NET_MODE" = "4" ] && echo "IPv4 Only" || echo "Dual Stack")"
 echo "=============================="
-echo ""
-
-# 生成 anytls:// 链接（兼容 sing-box / v2rayN / Throne 等客户端）
-if [ -n "$IPV4" ]; then
-    URI_V4="anytls://${ANYTLS_PASSWORD}@${IPV4}:${ANYTLS_PORT}?peer=${TLS_SERVER}&udp=1&hpkp=${SELF_SIGNED_FINGERPRINT_SHA256}#${NODE_NAME// /%20}"
-    hint "【IPv4 节点链接】"
-    echo "$URI_V4"
-    echo ""
-fi
-
-if [ -n "$IPV6" ]; then
-    URI_V6="anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${ANYTLS_PORT}?peer=${TLS_SERVER}&udp=1&hpkp=${SELF_SIGNED_FINGERPRINT_SHA256}#${NODE_NAME// /%20}"
-    hint "【IPv6 节点链接】"
-    echo "$URI_V6"
-    echo ""
-fi
-
-# 生成 sing-box 客户端 outbound JSON 片段（从 sing-box.sh 提取）
-hint "【Sing-box 客户端 outbound 配置】"
-cat << EOF
-{
-    "type": "anytls",
-    "tag": "${NODE_NAME}",
-    "server": "${MAIN_IP}",
-    "server_port": ${ANYTLS_PORT},
-    "password": "${ANYTLS_PASSWORD}",
-    "idle_session_check_interval": "30s",
-    "idle_session_timeout": "30s",
-    "min_idle_session": 5,
-    "tls": {
-        "enabled": true,
-        "certificate_public_key_sha256": ["${SELF_SIGNED_FINGERPRINT_BASE64}"],
-        "server_name": "${TLS_SERVER}",
-        "utls": {
-            "enabled": true,
-            "fingerprint": "chrome"
-        }
-    }
-}
-EOF
-
-echo ""
+echo "客户端 URI 配置："
+echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:${ANYTLS_PORT}"
 echo "=============================="
