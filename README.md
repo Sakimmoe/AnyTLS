@@ -118,7 +118,7 @@ anytls://password@[2001:db8::1]:26216
 使用：
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/install.sh)
+bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls)
 ```
 
 ---
