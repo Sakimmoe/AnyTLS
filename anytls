@@ -3,13 +3,25 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-ANYTLS_PORT=${1:-26216}
-ANYTLS_PASSWORD=${2:-kokonoeyukari}
-NET_MODE=${3:-}
+ANYTLS_PORT='26216'
+ANYTLS_PASSWORD=''
+NODE_NAME=''
 GITHUB_API="https://api.github.com/repos/anytls/anytls-go/releases/latest"
 
 info() { echo -e "\033[32m\033[01m$*\033[0m"; }
+hint() { echo -e "\033[33m\033[01m$*\033[0m"; }
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }
+reading() { read -rp "$(info "$1")" "$2"; }
+
+check_system_ip() {
+  IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "")
+  IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || echo "")
+  MAIN_IP=$([ -n "$IPV4" ] && echo "$IPV4" || echo "$IPV6")
+}
+
+echo "=========================================="
+echo " AnyTLS 部署脚本"
+echo "=========================================="
 
 if [ "$EUID" -ne 0 ]; then
     warning "Error: 请使用 root 用户运行"
@@ -42,18 +54,29 @@ net.ipv4.tcp_congestion_control=bbr
 EOF
 sysctl --system >/dev/null 2>&1 || true
 
-echo "获取服务器 IP..."
-IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "无")
-IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || echo "无")
-MAIN_IP=$([ "$IPV4" != "无" ] && echo "$IPV4" || echo "$IPV6")
-
-if [ "$NET_MODE" = "4" ]; then
-    LISTEN_ADDR="0.0.0.0"
-else
-    LISTEN_ADDR="[::]"
+check_system_ip
+if [ -z "$MAIN_IP" ]; then
+    warning "无法获取服务器 IP，请检查网络"
+    exit 1
 fi
 
-echo "停止旧服务..."
+hint ""
+hint "当前服务器 IP: ${MAIN_IP}"
+hint "以下配置直接按回车将使用默认值"
+hint ""
+
+reading "请输入 AnyTLS 端口 [默认: 26216]: " input_port
+ANYTLS_PORT=${input_port:-$ANYTLS_PORT}
+
+DEFAULT_PASSWORD=$(cat /proc/sys/kernel/random/uuid)
+reading "请输入 AnyTLS 密码 [默认: ${DEFAULT_PASSWORD}]: " input_pass
+ANYTLS_PASSWORD=${input_pass:-$DEFAULT_PASSWORD}
+
+DEFAULT_NAME=$(hostname 2>/dev/null || echo "AnyTLS")
+reading "请输入节点名称 [默认: ${DEFAULT_NAME}]: " input_name
+NODE_NAME=${input_name:-$DEFAULT_NAME}
+
+echo "部署 AnyTLS..."
 systemctl stop anytls >/dev/null 2>&1 || true
 sleep 1
 
@@ -128,7 +151,7 @@ After=network.target
 [Service]
 Type=simple
 LimitNOFILE=65535
-ExecStart=/usr/local/bin/anytls-server -l ${LISTEN_ADDR}:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
+ExecStart=/usr/local/bin/anytls-server -l [::]:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
 Restart=on-failure
 RestartSec=3s
 
@@ -166,13 +189,11 @@ if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]]; then
     SSH_PORT=22
 fi
 
-ufw allow 22/tcp comment 'SSH fallback' >/dev/null 2>&1 || true
-ufw allow "${SSH_PORT}"/tcp comment 'SSH' >/dev/null 2>&1 || true
-ufw allow "${ANYTLS_PORT}"/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
-ufw allow "${ANYTLS_PORT}"/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
+ufw allow ${SSH_PORT}/tcp comment 'SSH' >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
 ufw --force enable >/dev/null 2>&1 || true
 ufw reload >/dev/null 2>&1 || true
-echo "UFW 配置完成"
 
 echo "配置定时清理..."
 cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
@@ -184,13 +205,49 @@ echo ""
 echo "=============================="
 echo " AnyTLS 部署完成"
 echo "=============================="
-echo " IPv4     : $IPV4"
-echo " IPv6     : $IPV6"
-echo " Port     : $ANYTLS_PORT"
-echo " Password : $ANYTLS_PASSWORD"
-echo " Version  : ${VERSION}"
-echo " Mode     : $([ "$NET_MODE" = "4" ] && echo "IPv4 Only" || echo "Dual Stack")"
+info " IPv4     : ${IPV4:-无}"
+info " IPv6     : ${IPV6:-无}"
+info " Port     : ${ANYTLS_PORT}"
+info " Password : ${ANYTLS_PASSWORD}"
+info " Version  : ${VERSION}"
 echo "=============================="
-echo "客户端 URI 配置："
-echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:${ANYTLS_PORT}"
+echo ""
+
+if [ -n "$IPV4" ]; then
+    URI_V4="anytls://${ANYTLS_PASSWORD}@${IPV4}:${ANYTLS_PORT}?udp=1#${NODE_NAME// /%20}"
+    hint "【IPv4 节点链接】"
+    echo "$URI_V4"
+    echo ""
+fi
+
+if [ -n "$IPV6" ]; then
+    URI_V6="anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${ANYTLS_PORT}?udp=1#${NODE_NAME// /%20}"
+    hint "【IPv6 节点链接】"
+    echo "$URI_V6"
+    echo ""
+fi
+
+hint "【Sing-box 客户端 outbound 配置】"
+cat << EOF
+{
+    "type": "anytls",
+    "tag": "${NODE_NAME}",
+    "server": "${MAIN_IP}",
+    "server_port": ${ANYTLS_PORT},
+    "password": "${ANYTLS_PASSWORD}",
+    "idle_session_check_interval": "30s",
+    "idle_session_timeout": "30s",
+    "min_idle_session": 5,
+    "tls": {
+        "enabled": true,
+        "insecure": true,
+        "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+        }
+    }
+}
+EOF
+
+echo ""
 echo "=============================="
