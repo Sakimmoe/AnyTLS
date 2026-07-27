@@ -16,7 +16,6 @@ hint() { echo -e "\033[33m\033[01m$*\033[0m"; }
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }
 reading() { read -rp "$(info "$1")" "$2"; }
 
-# 普通自签证书（IP 直连模式）
 ssl_certificate() {
   local TLS_SERVER="$1"
   [ ! -d "${WORK_DIR}/cert" ] && mkdir -p "${WORK_DIR}/cert"
@@ -43,7 +42,6 @@ EOF
   rm -f "${WORK_DIR}/cert/cert.conf"
 }
 
-# CA 证书 + 签发服务器证书（CF 域名模式）
 generate_ca_cert() {
   local DOMAIN="$1"
   mkdir -p "${WORK_DIR}/cert"
@@ -70,7 +68,6 @@ generate_ca_cert() {
   rm -f "${WORK_DIR}/cert/server.csr" "${WORK_DIR}/cert/ca.srl"
 }
 
-# 证书内容转 JSON 字符串（转义换行）
 cert_to_json() {
   awk '{printf "%s\\n", $0}' "$1" | sed 's/\\n$//'
 }
@@ -119,7 +116,6 @@ if [ -z "$MAIN_IP" ]; then
     exit 1
 fi
 
-# 交互输入
 hint ""
 hint "当前服务器 IP: ${MAIN_IP}"
 hint "以下配置直接按回车将使用默认值"
@@ -141,7 +137,6 @@ reading "请输入你的域名 (托管在 Cloudflare，留空则使用 IP 直连
 reading "请输入对外 TLS 端口 [默认: 443]: " input_tls_port
 TLS_PORT=${input_tls_port:-$TLS_PORT}
 
-# 生成证书
 if [ -n "$DOMAIN" ]; then
     hint "正在生成 CA 根证书并签发服务器证书..."
     generate_ca_cert "$DOMAIN"
@@ -157,11 +152,9 @@ else
     KEY_FILE="${WORK_DIR}/cert/private.key"
 fi
 
-# 计算证书指纹
 SELF_SIGNED_FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${CERT_FILE}" | awk -F '=' '{print $NF}')
 SELF_SIGNED_FINGERPRINT_BASE64=$(openssl x509 -in "${CERT_FILE}" -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64)
 
-# 部署 AnyTLS
 echo "部署 AnyTLS..."
 systemctl stop anytls >/dev/null 2>&1 || true
 systemctl stop stunnel4 >/dev/null 2>&1 || true
@@ -228,7 +221,6 @@ cp "$FILE" /usr/local/bin/anytls-server
 chmod +x /usr/local/bin/anytls-server
 rm -rf "${TMP}"
 
-# anytls-server 仅监听本地，避免明文暴露
 mkdir -p "${WORK_DIR}"
 cat > /etc/systemd/system/anytls.service << EOF
 [Unit]
@@ -257,7 +249,6 @@ if ! systemctl is-active --quiet anytls; then
     exit 1
 fi
 
-# 使用 stunnel4 提供统一 TLS 前端
 echo "配置 stunnel4 TLS 前端..."
 cat > /etc/stunnel/stunnel.conf << EOF
 pid = /var/run/stunnel4.pid
@@ -282,7 +273,6 @@ if ! systemctl is-active --quiet stunnel4; then
     exit 1
 fi
 
-# 防火墙配置
 echo "配置防火墙..."
 systemctl unmask ufw >/dev/null 2>&1 || true
 systemctl enable --now ufw >/dev/null 2>&1 || true
@@ -307,14 +297,12 @@ ufw allow ${TLS_PORT}/udp comment 'AnyTLS TLS' >/dev/null 2>&1 || true
 ufw --force enable >/dev/null 2>&1 || true
 ufw reload >/dev/null 2>&1 || true
 
-# 定时清理
 echo "配置定时清理..."
 cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
 7 7 * * 0 root /bin/bash -c 'apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete' >/dev/null 2>&1
 CRONEOF
 chmod 644 /etc/cron.d/anytls-cleanup
 
-# 输出结果
 echo ""
 echo "=============================="
 echo " AnyTLS 部署完成"
@@ -395,4 +383,43 @@ EOF
     echo ""
 
 else
-   
+    if [ -n "$IPV4" ]; then
+        URI_V4="anytls://${ANYTLS_PASSWORD}@${IPV4}:${TLS_PORT}?peer=${SNI}&udp=1&hpkp=${SELF_SIGNED_FINGERPRINT_SHA256}#${NODE_NAME// /%20}"
+        hint "【IPv4 节点链接】"
+        echo "$URI_V4"
+        echo ""
+    fi
+
+    if [ -n "$IPV6" ]; then
+        URI_V6="anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${TLS_PORT}?peer=${SNI}&udp=1&hpkp=${SELF_SIGNED_FINGERPRINT_SHA256}#${NODE_NAME// /%20}"
+        hint "【IPv6 节点链接】"
+        echo "$URI_V6"
+        echo ""
+    fi
+
+    hint "【Sing-box 客户端 outbound 配置】"
+    cat << EOF
+{
+    "type": "anytls",
+    "tag": "${NODE_NAME}",
+    "server": "${MAIN_IP}",
+    "server_port": ${TLS_PORT},
+    "password": "${ANYTLS_PASSWORD}",
+    "idle_session_check_interval": "30s",
+    "idle_session_timeout": "30s",
+    "min_idle_session": 5,
+    "tls": {
+        "enabled": true,
+        "certificate_public_key_sha256": ["${SELF_SIGNED_FINGERPRINT_BASE64}"],
+        "server_name": "${SNI}",
+        "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+        }
+    }
+}
+EOF
+    echo ""
+fi
+
+echo "=============================="
