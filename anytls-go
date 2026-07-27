@@ -47,22 +47,44 @@ sysctl --system >/dev/null 2>&1 || true
 echo "获取服务器 IP..."
 IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org || echo "无")
 IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org || echo "无")
-MAIN_IP=$([ "$IPV4" != "无" ] && echo "$IPV4" || echo "$IPV6")
 
-if [ "$NET_MODE" = "4" ]; then
-    LISTEN_ADDR="0.0.0.0"
+# ---------- 处理部署模式 ----------
+if [ "$NET_MODE" = "dual" ]; then
+    DEPLOY_DUAL=true
+    V4_PORT=$ANYTLS_PORT
+    V6_PORT=$((ANYTLS_PORT + 1))
+    echo "双节点模式：IPv4 端口 $V4_PORT, IPv6 端口 $V6_PORT"
 else
-    LISTEN_ADDR="[::]"
+    DEPLOY_DUAL=false
+    if [ "$NET_MODE" = "4" ]; then
+        LISTEN_ADDR="0.0.0.0"
+    else
+        LISTEN_ADDR="[::]"
+    fi
 fi
 
+# ---------- 公共：下载 AnyTLS ----------
 echo "部署 AnyTLS..."
-systemctl stop anytls >/dev/null 2>&1 || true
+systemctl stop anytls 2>/dev/null || true
+systemctl stop anytls4 2>/dev/null || true
+systemctl stop anytls6 2>/dev/null || true
 sleep 1
 
-if ss -tlnp | grep -q ":${ANYTLS_PORT} "; then
-    echo "端口 ${ANYTLS_PORT} 已被占用"
-    ss -tlnp | grep ":${ANYTLS_PORT} "
-    exit 1
+# 端口占用检查
+if $DEPLOY_DUAL; then
+    for port in $V4_PORT $V6_PORT; do
+        if ss -tlnp | grep -q ":${port} "; then
+            echo "端口 ${port} 已被占用"
+            ss -tlnp | grep ":${port} "
+            exit 1
+        fi
+    done
+else
+    if ss -tlnp | grep -q ":${ANYTLS_PORT} "; then
+        echo "端口 ${ANYTLS_PORT} 已被占用"
+        ss -tlnp | grep ":${ANYTLS_PORT} "
+        exit 1
+    fi
 fi
 
 case "$(uname -m)" in
@@ -82,8 +104,6 @@ fi
 
 echo "当前 AnyTLS 版本: ${VERSION}"
 
-# ---------- 与旧脚本不同的安装方式 ----------
-# 直接根据版本号拼装下载链接，先尝试 tar.gz，再尝试 zip
 BASE_URL="https://github.com/anytls/anytls-go/releases/download/${VERSION}"
 TMP=$(mktemp -d)
 DOWNLOAD_SUCCESS=false
@@ -105,7 +125,6 @@ if [ "$DOWNLOAD_SUCCESS" = false ]; then
     rm -rf "${TMP}"
     exit 1
 fi
-# -------------------------------------------
 
 FILE=$(find "${TMP}" -type f -name "anytls-server" | head -1)
 if [ -z "$FILE" ]; then
@@ -117,10 +136,61 @@ fi
 cp "$FILE" /usr/local/bin/anytls-server
 chmod +x /usr/local/bin/anytls-server
 rm -rf "${TMP}"
-
 mkdir -p /etc/anytls
 
-cat > /etc/systemd/system/anytls.service << EOF
+# ---------- 创建 systemd 服务 ----------
+if $DEPLOY_DUAL; then
+    # IPv4 服务
+    cat > /etc/systemd/system/anytls4.service << EOF
+[Unit]
+Description=AnyTLS IPv4 Service
+After=network.target
+
+[Service]
+Type=simple
+LimitNOFILE=65535
+ExecStart=/usr/local/bin/anytls-server -l 0.0.0.0:${V4_PORT} -p ${ANYTLS_PASSWORD}
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # IPv6 服务
+    cat > /etc/systemd/system/anytls6.service << EOF
+[Unit]
+Description=AnyTLS IPv6 Service
+After=network.target
+
+[Service]
+Type=simple
+LimitNOFILE=65535
+ExecStart=/usr/local/bin/anytls-server -l [::]:${V6_PORT} -p ${ANYTLS_PASSWORD}
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable anytls4 anytls6 >/dev/null 2>&1 || true
+    systemctl restart anytls4 anytls6 >/dev/null 2>&1 || true
+    sleep 2
+
+    if ! systemctl is-active --quiet anytls4; then
+        echo "AnyTLS IPv4 启动失败"
+        journalctl -u anytls4 -n 20 --no-pager
+        exit 1
+    fi
+    if ! systemctl is-active --quiet anytls6; then
+        echo "AnyTLS IPv6 启动失败"
+        journalctl -u anytls6 -n 20 --no-pager
+        exit 1
+    fi
+else
+    cat > /etc/systemd/system/anytls.service << EOF
 [Unit]
 Description=AnyTLS Server Service
 After=network.target
@@ -136,17 +206,19 @@ RestartSec=3s
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable anytls >/dev/null 2>&1 || true
-systemctl restart anytls >/dev/null 2>&1 || true
-sleep 2
+    systemctl daemon-reload
+    systemctl enable anytls >/dev/null 2>&1 || true
+    systemctl restart anytls >/dev/null 2>&1 || true
+    sleep 2
 
-if ! systemctl is-active --quiet anytls; then
-    echo "AnyTLS 启动失败"
-    journalctl -u anytls -n 20 --no-pager
-    exit 1
+    if ! systemctl is-active --quiet anytls; then
+        echo "AnyTLS 启动失败"
+        journalctl -u anytls -n 20 --no-pager
+        exit 1
+    fi
 fi
 
+# ---------- 防火墙配置 ----------
 echo "配置防火墙..."
 systemctl unmask ufw >/dev/null 2>&1 || true
 systemctl enable --now ufw >/dev/null 2>&1 || true
@@ -168,28 +240,56 @@ fi
 
 ufw allow 22/tcp comment 'SSH fallback' >/dev/null 2>&1 || true
 ufw allow ${SSH_PORT}/tcp comment 'SSH' >/dev/null 2>&1 || true
-ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
-ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
+
+if $DEPLOY_DUAL; then
+    ufw allow ${V4_PORT}/tcp comment 'AnyTLS IPv4 TCP' >/dev/null 2>&1 || true
+    ufw allow ${V4_PORT}/udp comment 'AnyTLS IPv4 UDP' >/dev/null 2>&1 || true
+    ufw allow ${V6_PORT}/tcp comment 'AnyTLS IPv6 TCP' >/dev/null 2>&1 || true
+    ufw allow ${V6_PORT}/udp comment 'AnyTLS IPv6 UDP' >/dev/null 2>&1 || true
+else
+    ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
+    ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
+fi
+
 ufw --force enable >/dev/null 2>&1 || true
 ufw reload >/dev/null 2>&1 || true
 echo "UFW 配置完成"
 
+# ---------- 定时清理 ----------
 echo "配置定时清理..."
 cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
 7 7 * * 0 root /bin/bash -c 'apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete' >/dev/null 2>&1
 CRONEOF
 chmod 644 /etc/cron.d/anytls-cleanup
 
+# ---------- 输出结果 ----------
 echo -e "\n=============================="
 echo " AnyTLS 部署完成"
 echo "=============================="
-echo " IPv4     : $IPV4"
-echo " IPv6     : $IPV6"
-echo " Port     : $ANYTLS_PORT"
-echo " Password : $ANYTLS_PASSWORD"
-echo " Version  : $VERSION"
-echo " Mode     : $([ "$NET_MODE" = "4" ] && echo "IPv4 Only" || echo "Dual Stack")"
-echo "=============================="
-echo "客户端 URI 配置："
-echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:${ANYTLS_PORT}"
+echo " 版本     : $VERSION"
+echo " 密码     : $ANYTLS_PASSWORD"
+if $DEPLOY_DUAL; then
+    echo "------------------------------"
+    echo " IPv4 节点"
+    echo " IP       : $IPV4"
+    echo " 端口     : $V4_PORT"
+    echo " URI      : anytls://${ANYTLS_PASSWORD}@${IPV4}:${V4_PORT}"
+    echo "------------------------------"
+    echo " IPv6 节点"
+    echo " IP       : $IPV6"
+    echo " 端口     : $V6_PORT"
+    echo " URI      : anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${V6_PORT}"
+    echo "------------------------------"
+    echo " 也可以使用域名 (需同时解析 A 和 AAAA 记录):"
+    echo " 域名     : zouterhklite.yukari.icu"
+    echo " 节点1    : anytls://${ANYTLS_PASSWORD}@zouterhklite.yukari.icu:${V4_PORT}"
+    echo " 节点2    : anytls://${ANYTLS_PASSWORD}@zouterhklite.yukari.icu:${V6_PORT}"
+    echo " (客户端通过选择不同端口即可区分 IPv4 与 IPv6)"
+else
+    MAIN_IP=$([ "$IPV4" != "无" ] && echo "$IPV4" || echo "$IPV6")
+    echo " IP       : $IPV4 (v4) / $IPV6 (v6)"
+    echo " 端口     : $ANYTLS_PORT"
+    echo " 模式     : $([ "$NET_MODE" = "4" ] && echo "IPv4 Only" || echo "Dual Stack")"
+    echo " URI      : anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:${ANYTLS_PORT}"
+fi
 echo "=============================="
