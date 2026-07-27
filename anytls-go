@@ -216,6 +216,20 @@ info " Password : $ANYTLS_PASSWORD"
 info " Version  : $VERSION"
 info " Mode     : $([ "$NET_MODE" = "4" ] && echo "IPv4 Only" || echo "Dual Stack")"
 echo "=============================="
+
 hint "客户端 URI 配置："
-echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:${ANYTLS_PORT}"
+
+if [ "$IPV4" != "无" ] && [ -n "$IPV4" ]; then
+    echo ""
+    hint "【IPv4 节点】"
+    echo "anytls://${ANYTLS_PASSWORD}@${IPV4}:${ANYTLS_PORT}"
+fi
+
+if [ "$IPV6" != "无" ] && [ -n "$IPV6" ]; then
+    echo ""
+    hint "【IPv6 节点】"
+    echo "anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${ANYTLS_PORT}"
+fi
+
+echo ""
 echo "=============================="
