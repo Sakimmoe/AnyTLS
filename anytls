@@ -3,7 +3,7 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-ANYTLS_PORT='26216'
+ANYTLS_PORT='443'
 ANYTLS_PASSWORD=''
 NODE_NAME=''
 DOMAIN=''
@@ -15,55 +15,61 @@ hint() { echo -e "\033[33m\033[01m$*\033[0m"; }
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }
 reading() { read -rp "$(info "$1")" "$2"; }
 
-generate_selfsigned_cert() {
+# ==========================================
+# 自建 CA 证书体系
+# ==========================================
+generate_ca_certificates() {
   local CN="$1"
+  local SERVER_IP="$2"
+  
   mkdir -p "${WORK_DIR}/cert"
   
+  # 1. 生成 CA 私钥和自签 CA 证书
+  openssl genrsa -out "${WORK_DIR}/cert/ca.key" 4096 2>/dev/null
+  openssl req -x509 -new -nodes \
+    -key "${WORK_DIR}/cert/ca.key" \
+    -sha256 -days 3650 \
+    -out "${WORK_DIR}/cert/ca.crt" \
+    -subj "/CN=AnyTLS Root CA/O=AnyTLS" 2>/dev/null
+  
+  # 2. 生成服务器私钥和 CSR
+  openssl genrsa -out "${WORK_DIR}/cert/server.key" 2048 2>/dev/null
+  openssl req -new \
+    -key "${WORK_DIR}/cert/server.key" \
+    -out "${WORK_DIR}/cert/server.csr" \
+    -subj "/CN=${CN}/O=AnyTLS" 2>/dev/null
+  
+  # 3. 创建扩展配置文件（SAN）
   cat > "${WORK_DIR}/cert/ext.cnf" << EOF
 basicConstraints = CA:FALSE
 keyUsage = nonRepudiation, digitalSignature, keyEncipherment
-subjectAltName = @alt_names
-
-[alt_names]
-DNS.1 = ${CN}
-IP.1 = 0.0.0.0
-IP.2 = ::
-EOF
-
-  openssl req -x509 -nodes -days 3650 \
-    -newkey ec:<(openssl ecparam -name prime256v1) \
-    -keyout "${WORK_DIR}/cert/server.key" \
-    -out "${WORK_DIR}/cert/server.crt" \
-    -subj "/CN=${CN}" \
-    -config <(cat << HEREDOC
-[req]
-distinguished_name = req_distinguished_name
-x509_extensions = v3_req
-prompt = no
-
-[req_distinguished_name]
-CN = ${CN}
-
-[v3_req]
-keyUsage = keyEncipherment, dataEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = @alt_names
-
-[alt_names]
-DNS.1 = ${CN}
-IP.1 = 0.0.0.0
-IP.2 = ::
-HEREDOC
-) 2>/dev/null
-
-  rm -f "${WORK_DIR}/cert/ext.cnf"
+subjectAltName = DNS:${CN},IP:${SERVER_IP}
+EOF
   
+  # 4. 用 CA 签发服务器证书
+  openssl x509 -req \
+    -in "${WORK_DIR}/cert/server.csr" \
+    -CA "${WORK_DIR}/cert/ca.crt" \
+    -CAkey "${WORK_DIR}/cert/ca.key" \
+    -CAcreateserial \
+    -out "${WORK_DIR}/cert/server.crt" \
+    -days 3650 -sha256 \
+    -extfile "${WORK_DIR}/cert/ext.cnf" 2>/dev/null
+  
+  rm -f "${WORK_DIR}/cert/server.csr" "${WORK_DIR}/cert/ext.cnf" "${WORK_DIR}/cert/ca.srl"
+  
+  # 5. 计算服务器证书公钥指纹（base64，sing-box certificate_public_key_sha256 用）
   CERT_FINGERPRINT=$(openssl x509 -in "${WORK_DIR}/cert/server.crt" -pubkey -noout | \
     openssl pkey -pubin -outform der | \
     openssl dgst -sha256 -binary | \
     openssl enc -base64)
   
+  # 6. 计算证书 SHA256 指纹（URI hpkp 用）
   CERT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${WORK_DIR}/cert/server.crt" | awk -F= '{print $2}')
+  
+  # 7. 把 CA 证书转为单行 JSON 字符串（含 \n）
+  CA_CERT_JSON=$(awk '{printf "%s\\n", $0}' "${WORK_DIR}/cert/ca.crt" | sed 's/\\n$//')
 }
 
 check_system_ip() {
@@ -73,7 +79,7 @@ check_system_ip() {
 }
 
 echo "=========================================="
-echo " AnyTLS 一键部署脚本"
+echo " AnyTLS 一键部署脚本（自建 CA + 原生 TLS）"
 echo "=========================================="
 
 if [ "$EUID" -ne 0 ]; then
@@ -81,6 +87,9 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# ==========================================
+# 清理旧配置（包括之前版本的 stunnel4）
+# ==========================================
 echo "清理旧配置..."
 systemctl stop anytls stunnel4 2>/dev/null || true
 systemctl disable anytls stunnel4 2>/dev/null || true
@@ -92,9 +101,12 @@ ufw delete allow 443/tcp 2>/dev/null || true
 ufw delete allow 443/udp 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
 
+# ==========================================
+# 安装依赖
+# ==========================================
 echo "安装依赖..."
 apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar openssl stunnel4 >/dev/null 2>&1 || true
+apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar openssl >/dev/null 2>&1 || true
 
 echo "优化网络配置..."
 grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
@@ -121,6 +133,9 @@ if [ -z "$MAIN_IP" ]; then
     exit 1
 fi
 
+# ==========================================
+# 交互输入
+# ==========================================
 hint ""
 hint "当前服务器 IP: ${MAIN_IP}"
 hint ""
@@ -136,14 +151,23 @@ reading "请输入你的域名（没有就留空，直接用 IP）: " DOMAIN
 
 if [ -n "$DOMAIN" ]; then
   SNI="$DOMAIN"
-  hint "使用域名作为证书 CN: ${DOMAIN}"
+  CERT_CN="$DOMAIN"
+  hint "使用域名: ${DOMAIN}"
 else
   SNI="${MAIN_IP}"
-  hint "使用 IP 作为证书 CN: ${MAIN_IP}"
+  CERT_CN="${MAIN_IP}"
+  hint "使用 IP: ${MAIN_IP}"
 fi
 
-generate_selfsigned_cert "$SNI"
+# ==========================================
+# 生成 CA 证书
+# ==========================================
+echo "生成 CA 根证书并签发服务器证书..."
+generate_ca_certificates "$CERT_CN" "$MAIN_IP"
 
+# ==========================================
+# 下载 AnyTLS
+# ==========================================
 echo "下载 AnyTLS..."
 case "$(uname -m)" in
     x86_64|amd64) ARCH="amd64" ;;
@@ -175,6 +199,10 @@ cp "$FILE" /usr/local/bin/anytls-server
 chmod +x /usr/local/bin/anytls-server
 rm -rf "${TMP}"
 
+# ==========================================
+# 配置 systemd（原生 TLS，无需 stunnel4）
+# ==========================================
+mkdir -p "${WORK_DIR}"
 cat > /etc/systemd/system/anytls.service << EOF
 [Unit]
 Description=AnyTLS Server
@@ -182,7 +210,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/anytls-server -l 127.0.0.1:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
+LimitNOFILE=65535
+ExecStart=/usr/local/bin/anytls-server -l [::]:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD} --cert ${WORK_DIR}/cert/server.crt --key ${WORK_DIR}/cert/server.key
 Restart=on-failure
 RestartSec=3
 
@@ -190,33 +219,20 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/stunnel/stunnel.conf << EOF
-pid = /var/run/stunnel4.pid
-foreground = no
-
-[anytls]
-accept = :::443
-connect = 127.0.0.1:${ANYTLS_PORT}
-cert = ${WORK_DIR}/cert/server.crt
-key = ${WORK_DIR}/cert/server.key
-EOF
-
-if [ -f /etc/default/stunnel4 ]; then
-    sed -i 's/ENABLED=0/ENABLED=1/' /etc/default/stunnel4
-fi
-
 systemctl daemon-reload
-systemctl enable anytls stunnel4 >/dev/null 2>&1 || true
-systemctl restart anytls stunnel4 >/dev/null 2>&1 || true
+systemctl enable anytls >/dev/null 2>&1 || true
+systemctl restart anytls >/dev/null 2>&1 || true
 sleep 2
 
 if ! systemctl is-active --quiet anytls; then
-    warning "AnyTLS 启动失败"; journalctl -u anytls -n 10 --no-pager; exit 1
-fi
-if ! systemctl is-active --quiet stunnel4; then
-    warning "stunnel4 启动失败"; journalctl -u stunnel4 -n 10 --no-pager; exit 1
+    warning "AnyTLS 启动失败"
+    journalctl -u anytls -n 20 --no-pager
+    exit 1
 fi
 
+# ==========================================
+# 防火墙
+# ==========================================
 echo "配置防火墙..."
 systemctl unmask ufw >/dev/null 2>&1 || true
 systemctl enable --now ufw >/dev/null 2>&1 || true
@@ -231,34 +247,40 @@ if [ -f /etc/ssh/sshd_config ]; then
 fi
 
 ufw allow ${SSH_PORT}/tcp comment 'SSH' >/dev/null 2>&1 || true
-ufw allow 443/tcp comment 'AnyTLS' >/dev/null 2>&1 || true
-ufw allow 443/udp comment 'AnyTLS' >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS' >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS' >/dev/null 2>&1 || true
 ufw --force enable >/dev/null 2>&1 || true
 
+# ==========================================
+# 定时清理
+# ==========================================
 cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
 7 7 * * 0 root /bin/bash -c 'apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete' >/dev/null 2>&1
 CRONEOF
 chmod 644 /etc/cron.d/anytls-cleanup
 
+# ==========================================
+# 输出结果
+# ==========================================
 echo ""
 echo "=========================================="
 info " AnyTLS 部署完成"
 echo "=========================================="
 info " 服务器 IP : ${MAIN_IP}"
-info " 端口      : 443"
+info " 端口      : ${ANYTLS_PORT}"
 info " 密码      : ${ANYTLS_PASSWORD}"
 info " SNI       : ${SNI}"
 info " 版本      : ${VERSION}"
 echo "=========================================="
 echo ""
 
-hint "【推荐】Sing-box 客户端配置（证书指纹校验，无需证书文件）"
+hint "【方案一 推荐】Sing-box 配置（证书公钥指纹，无需证书文件）"
 cat << EOF
 {
     "type": "anytls",
     "tag": "${NODE_NAME}",
     "server": "${MAIN_IP}",
-    "server_port": 443,
+    "server_port": ${ANYTLS_PORT},
     "password": "${ANYTLS_PASSWORD}",
     "idle_session_check_interval": "30s",
     "idle_session_timeout": "30s",
@@ -276,13 +298,37 @@ cat << EOF
 EOF
 echo ""
 
-hint "【备用】Sing-box 客户端配置（跳过证书验证，仅测试用）"
+hint "【方案二】Sing-box 配置（导入 CA 证书）"
 cat << EOF
 {
     "type": "anytls",
     "tag": "${NODE_NAME}",
     "server": "${MAIN_IP}",
-    "server_port": 443,
+    "server_port": ${ANYTLS_PORT},
+    "password": "${ANYTLS_PASSWORD}",
+    "idle_session_check_interval": "30s",
+    "idle_session_timeout": "30s",
+    "min_idle_session": 5,
+    "tls": {
+        "enabled": true,
+        "server_name": "${SNI}",
+        "certificate": ["${CA_CERT_JSON}"],
+        "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+        }
+    }
+}
+EOF
+echo ""
+
+hint "【方案三 测试用】Sing-box 配置（跳过证书验证）"
+cat << EOF
+{
+    "type": "anytls",
+    "tag": "${NODE_NAME}",
+    "server": "${MAIN_IP}",
+    "server_port": ${ANYTLS_PORT},
     "password": "${ANYTLS_PASSWORD}",
     "idle_session_check_interval": "30s",
     "idle_session_timeout": "30s",
@@ -301,6 +347,10 @@ EOF
 echo ""
 
 hint "【节点 URI】"
-echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:443?peer=${SNI}&udp=1&hpkp=${CERT_SHA256}#${NODE_NAME// /%20}"
+echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:${ANYTLS_PORT}?peer=${SNI}&udp=1&hpkp=${CERT_SHA256}#${NODE_NAME// /%20}"
+echo ""
+
+hint "【CA 证书文件】（客户端手动导入用）"
+echo "${WORK_DIR}/cert/ca.crt"
 echo ""
 echo "=========================================="
