@@ -7,7 +7,6 @@ ANYTLS_PORT='26216'
 ANYTLS_PASSWORD=''
 NODE_NAME=''
 DOMAIN=''
-TLS_PORT='443'
 WORK_DIR='/etc/anytls'
 GITHUB_API="https://api.github.com/repos/anytls/anytls-go/releases/latest"
 
@@ -16,60 +15,55 @@ hint() { echo -e "\033[33m\033[01m$*\033[0m"; }
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }
 reading() { read -rp "$(info "$1")" "$2"; }
 
-ssl_certificate() {
-  local TLS_SERVER="$1"
-  [ ! -d "${WORK_DIR}/cert" ] && mkdir -p "${WORK_DIR}/cert"
-  if [ ! -s "${WORK_DIR}/cert/private.key" ]; then
-    openssl ecparam -genkey -name prime256v1 -out "${WORK_DIR}/cert/private.key" 2>/dev/null
-  fi
-  cat > "${WORK_DIR}/cert/cert.conf" << EOF
+generate_selfsigned_cert() {
+  local CN="$1"
+  mkdir -p "${WORK_DIR}/cert"
+  
+  cat > "${WORK_DIR}/cert/ext.cnf" << EOF
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = ${CN}
+IP.1 = 0.0.0.0
+IP.2 = ::
+EOF
+
+  openssl req -x509 -nodes -days 3650 \
+    -newkey ec:<(openssl ecparam -name prime256v1) \
+    -keyout "${WORK_DIR}/cert/server.key" \
+    -out "${WORK_DIR}/cert/server.crt" \
+    -subj "/CN=${CN}" \
+    -config <(cat << HEREDOC
 [req]
 distinguished_name = req_distinguished_name
 x509_extensions = v3_req
 prompt = no
+
 [req_distinguished_name]
-CN = $(awk -F . '{print $(NF-1)"."$NF}' <<< "$TLS_SERVER")
+CN = ${CN}
+
 [v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
 subjectAltName = @alt_names
+
 [alt_names]
-DNS = ${TLS_SERVER}
-EOF
-  openssl req -new -x509 -days 36500 \
-    -key "${WORK_DIR}/cert/private.key" \
-    -out "${WORK_DIR}/cert/cert.pem" \
-    -config "${WORK_DIR}/cert/cert.conf" \
-    -extensions v3_req 2>/dev/null
-  rm -f "${WORK_DIR}/cert/cert.conf"
-}
+DNS.1 = ${CN}
+IP.1 = 0.0.0.0
+IP.2 = ::
+HEREDOC
+) 2>/dev/null
 
-generate_ca_cert() {
-  local DOMAIN="$1"
-  mkdir -p "${WORK_DIR}/cert"
-  openssl genrsa -out "${WORK_DIR}/cert/ca.key" 2048 2>/dev/null
-  openssl req -x509 -new -nodes \
-    -key "${WORK_DIR}/cert/ca.key" -sha256 -days 3650 \
-    -out "${WORK_DIR}/cert/ca.crt" \
-    -subj "/CN=AnyTLS Root CA" 2>/dev/null
+  rm -f "${WORK_DIR}/cert/ext.cnf"
   
-  openssl genrsa -out "${WORK_DIR}/cert/server.key" 2048 2>/dev/null
-  openssl req -new \
-    -key "${WORK_DIR}/cert/server.key" \
-    -out "${WORK_DIR}/cert/server.csr" \
-    -subj "/CN=${DOMAIN}" 2>/dev/null
+  CERT_FINGERPRINT=$(openssl x509 -in "${WORK_DIR}/cert/server.crt" -pubkey -noout | \
+    openssl pkey -pubin -outform der | \
+    openssl dgst -sha256 -binary | \
+    openssl enc -base64)
   
-  openssl x509 -req \
-    -in "${WORK_DIR}/cert/server.csr" \
-    -CA "${WORK_DIR}/cert/ca.crt" \
-    -CAkey "${WORK_DIR}/cert/ca.key" \
-    -CAcreateserial \
-    -out "${WORK_DIR}/cert/server.crt" \
-    -days 3650 -sha256 2>/dev/null
-  
-  rm -f "${WORK_DIR}/cert/server.csr" "${WORK_DIR}/cert/ca.srl"
-}
-
-cert_to_json() {
-  awk '{printf "%s\\n", $0}' "$1" | sed 's/\\n$//'
+  CERT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${WORK_DIR}/cert/server.crt" | awk -F= '{print $2}')
 }
 
 check_system_ip() {
@@ -79,13 +73,24 @@ check_system_ip() {
 }
 
 echo "=========================================="
-echo " AnyTLS 部署脚本（CF + 自签 CA 版）"
+echo " AnyTLS 一键部署脚本"
 echo "=========================================="
 
 if [ "$EUID" -ne 0 ]; then
-    warning "Error: 请使用 root 用户运行"
+    warning "请使用 root 用户运行"
     exit 1
 fi
+
+echo "清理旧配置..."
+systemctl stop anytls stunnel4 2>/dev/null || true
+systemctl disable anytls stunnel4 2>/dev/null || true
+rm -f /etc/systemd/system/anytls.service
+rm -f /usr/local/bin/anytls-server
+rm -rf /etc/anytls
+rm -f /etc/cron.d/anytls-cleanup
+ufw delete allow 443/tcp 2>/dev/null || true
+ufw delete allow 443/udp 2>/dev/null || true
+systemctl daemon-reload 2>/dev/null || true
 
 echo "安装依赖..."
 apt-get update -qq >/dev/null 2>&1 || true
@@ -97,7 +102,7 @@ systemctl disable systemd-resolved --now >/dev/null 2>&1 || true
 systemctl mask systemd-resolved >/dev/null 2>&1 || true
 chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
 rm -f /etc/resolv.conf >/dev/null 2>&1 || true
-cat > /etc/resolv.conf << EOF
+cat > /etc/resolv.conf << 'EOF'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 nameserver 2606:4700:4700::1111
@@ -112,94 +117,49 @@ sysctl --system >/dev/null 2>&1 || true
 
 check_system_ip
 if [ -z "$MAIN_IP" ]; then
-    warning "无法获取服务器 IP，请检查网络"
+    warning "无法获取服务器 IP"
     exit 1
 fi
 
 hint ""
 hint "当前服务器 IP: ${MAIN_IP}"
-hint "以下配置直接按回车将使用默认值"
 hint ""
 
-reading "请输入 AnyTLS 本地端口 [默认: 26216]: " input_port
-ANYTLS_PORT=${input_port:-$ANYTLS_PORT}
-
-DEFAULT_PASSWORD=$(cat /proc/sys/kernel/random/uuid)
-reading "请输入 AnyTLS 密码 [默认: ${DEFAULT_PASSWORD}]: " input_pass
-ANYTLS_PASSWORD=${input_pass:-$DEFAULT_PASSWORD}
+reading "请输入 AnyTLS 密码（留空则随机生成）: " ANYTLS_PASSWORD
+[ -z "$ANYTLS_PASSWORD" ] && ANYTLS_PASSWORD=$(cat /proc/sys/kernel/random/uuid) && hint "已生成随机密码: ${ANYTLS_PASSWORD}"
 
 DEFAULT_NAME=$(hostname 2>/dev/null || echo "AnyTLS")
-reading "请输入节点名称 [默认: ${DEFAULT_NAME}]: " input_name
-NODE_NAME=${input_name:-$DEFAULT_NAME}
+reading "请输入节点名称 [默认: ${DEFAULT_NAME}]: " NODE_NAME
+NODE_NAME=${NODE_NAME:-$DEFAULT_NAME}
 
-reading "请输入你的域名 (托管在 Cloudflare，留空则使用 IP 直连): " DOMAIN
-
-reading "请输入对外 TLS 端口 [默认: 443]: " input_tls_port
-TLS_PORT=${input_tls_port:-$TLS_PORT}
+reading "请输入你的域名（没有就留空，直接用 IP）: " DOMAIN
 
 if [ -n "$DOMAIN" ]; then
-    hint "正在生成 CA 根证书并签发服务器证书..."
-    generate_ca_cert "$DOMAIN"
-    CERT_FILE="${WORK_DIR}/cert/server.crt"
-    KEY_FILE="${WORK_DIR}/cert/server.key"
-    SNI="$DOMAIN"
-    CA_CERT_JSON=$(cert_to_json "${WORK_DIR}/cert/ca.crt")
+  SNI="$DOMAIN"
+  hint "使用域名作为证书 CN: ${DOMAIN}"
 else
-    SNI="addons.mozilla.org"
-    hint "正在生成自签证书..."
-    ssl_certificate "$SNI"
-    CERT_FILE="${WORK_DIR}/cert/cert.pem"
-    KEY_FILE="${WORK_DIR}/cert/private.key"
+  SNI="${MAIN_IP}"
+  hint "使用 IP 作为证书 CN: ${MAIN_IP}"
 fi
 
-SELF_SIGNED_FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${CERT_FILE}" | awk -F '=' '{print $NF}')
-SELF_SIGNED_FINGERPRINT_BASE64=$(openssl x509 -in "${CERT_FILE}" -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64)
+generate_selfsigned_cert "$SNI"
 
-echo "部署 AnyTLS..."
-systemctl stop anytls >/dev/null 2>&1 || true
-systemctl stop stunnel4 >/dev/null 2>&1 || true
-sleep 1
-
-if ss -tlnp | grep -q ":${ANYTLS_PORT} "; then
-    warning "端口 ${ANYTLS_PORT} 已被占用"
-    ss -tlnp | grep ":${ANYTLS_PORT} "
-    exit 1
-fi
-
+echo "下载 AnyTLS..."
 case "$(uname -m)" in
     x86_64|amd64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
     *) warning "不支持的架构: $(uname -m)"; exit 1 ;;
 esac
 
-echo "获取 AnyTLS 最新版本..."
 RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 ${GITHUB_API})
 VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
+[ -z "$VERSION" ] || [ "$VERSION" = "null" ] && { warning "获取版本失败"; exit 1; }
 
-if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-    warning "获取版本失败，请检查网络"
-    exit 1
-fi
-info "当前 AnyTLS 版本: ${VERSION}"
-
-ASSET_URL=$(echo "$RELEASE_INFO" \
-| jq -r ".assets[].browser_download_url" \
-| grep -i "linux" \
-| grep -i "${ARCH}" \
-| grep -v -i "sha256" \
-| head -1 || true)
-
-if [ -z "$ASSET_URL" ]; then
-    warning "未找到适用于 Linux ${ARCH} 的下载文件"
-    exit 1
-fi
+ASSET_URL=$(echo "$RELEASE_INFO" | jq -r ".assets[].browser_download_url" | grep -i "linux" | grep -i "${ARCH}" | grep -v -i "sha256" | head -1 || true)
+[ -z "$ASSET_URL" ] && { warning "未找到下载文件"; exit 1; }
 
 TMP=$(mktemp -d)
-wget --timeout=30 -q -O "${TMP}/anytls.pkg" "$ASSET_URL" || {
-    warning "AnyTLS 下载失败"
-    rm -rf "${TMP}"
-    exit 1
-}
+wget --timeout=30 -q -O "${TMP}/anytls.pkg" "$ASSET_URL" || { warning "下载失败"; rm -rf "${TMP}"; exit 1; }
 
 rm -f /usr/local/bin/anytls-server
 if [[ "$ASSET_URL" == *.tar.gz ]]; then
@@ -211,66 +171,50 @@ else
 fi
 
 FILE=$(find "${TMP}" -type f -name "anytls-server" | head -1)
-if [ -z "$FILE" ]; then
-    warning "解压后未找到二进制文件"
-    rm -rf "${TMP}"
-    exit 1
-fi
-
 cp "$FILE" /usr/local/bin/anytls-server
 chmod +x /usr/local/bin/anytls-server
 rm -rf "${TMP}"
 
-mkdir -p "${WORK_DIR}"
 cat > /etc/systemd/system/anytls.service << EOF
 [Unit]
-Description=AnyTLS Server Service
+Description=AnyTLS Server
 After=network.target
 
 [Service]
 Type=simple
-LimitNOFILE=65535
 ExecStart=/usr/local/bin/anytls-server -l 127.0.0.1:${ANYTLS_PORT} -p ${ANYTLS_PASSWORD}
 Restart=on-failure
-RestartSec=3s
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable anytls >/dev/null 2>&1 || true
-systemctl restart anytls >/dev/null 2>&1 || true
-sleep 2
-
-if ! systemctl is-active --quiet anytls; then
-    warning "AnyTLS 启动失败"
-    journalctl -u anytls -n 20 --no-pager
-    exit 1
-fi
-
-echo "配置 stunnel4 TLS 前端..."
 cat > /etc/stunnel/stunnel.conf << EOF
 pid = /var/run/stunnel4.pid
+foreground = no
+
 [anytls]
-accept = :::${TLS_PORT}
+accept = :::443
 connect = 127.0.0.1:${ANYTLS_PORT}
-cert = ${CERT_FILE}
-key = ${KEY_FILE}
+cert = ${WORK_DIR}/cert/server.crt
+key = ${WORK_DIR}/cert/server.key
 EOF
 
 if [ -f /etc/default/stunnel4 ]; then
     sed -i 's/ENABLED=0/ENABLED=1/' /etc/default/stunnel4
 fi
+
 systemctl daemon-reload
-systemctl enable stunnel4 >/dev/null 2>&1 || true
-systemctl restart stunnel4 >/dev/null 2>&1 || true
+systemctl enable anytls stunnel4 >/dev/null 2>&1 || true
+systemctl restart anytls stunnel4 >/dev/null 2>&1 || true
 sleep 2
 
+if ! systemctl is-active --quiet anytls; then
+    warning "AnyTLS 启动失败"; journalctl -u anytls -n 10 --no-pager; exit 1
+fi
 if ! systemctl is-active --quiet stunnel4; then
-    warning "stunnel4 启动失败"
-    journalctl -u stunnel4 -n 20 --no-pager
-    exit 1
+    warning "stunnel4 启动失败"; journalctl -u stunnel4 -n 10 --no-pager; exit 1
 fi
 
 echo "配置防火墙..."
@@ -280,138 +224,49 @@ ufw --force reset >/dev/null 2>&1 || true
 ufw default deny incoming >/dev/null 2>&1 || true
 ufw default allow outgoing >/dev/null 2>&1 || true
 
-SSH_PORT=""
+SSH_PORT=22
 if [ -f /etc/ssh/sshd_config ]; then
-    SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config | head -1 | awk '{print $2}' | tr -d '\r\n' || true)
-fi
-if [ -z "$SSH_PORT" ] && [ -d /etc/ssh/sshd_config.d ]; then
-    SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config.d/*.conf 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r\n' || true)
-fi
-if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]]; then
-    SSH_PORT=22
+    _p=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config | head -1 | awk '{print $2}' | tr -d '\r\n' || true)
+    [ -n "$_p" ] && SSH_PORT="$_p"
 fi
 
 ufw allow ${SSH_PORT}/tcp comment 'SSH' >/dev/null 2>&1 || true
-ufw allow ${TLS_PORT}/tcp comment 'AnyTLS TLS' >/dev/null 2>&1 || true
-ufw allow ${TLS_PORT}/udp comment 'AnyTLS TLS' >/dev/null 2>&1 || true
+ufw allow 443/tcp comment 'AnyTLS' >/dev/null 2>&1 || true
+ufw allow 443/udp comment 'AnyTLS' >/dev/null 2>&1 || true
 ufw --force enable >/dev/null 2>&1 || true
-ufw reload >/dev/null 2>&1 || true
 
-echo "配置定时清理..."
 cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
 7 7 * * 0 root /bin/bash -c 'apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete' >/dev/null 2>&1
 CRONEOF
 chmod 644 /etc/cron.d/anytls-cleanup
 
 echo ""
-echo "=============================="
-echo " AnyTLS 部署完成"
-echo "=============================="
-info " IPv4     : ${IPV4:-无}"
-info " IPv6     : ${IPV6:-无}"
-info " 本地端口 : ${ANYTLS_PORT} (仅本地，由 stunnel4 反代)"
-info " TLS 端口 : ${TLS_PORT}"
-info " Password : ${ANYTLS_PASSWORD}"
-info " SNI      : ${SNI}"
-info " Version  : ${VERSION}"
-echo "=============================="
+echo "=========================================="
+info " AnyTLS 部署完成"
+echo "=========================================="
+info " 服务器 IP : ${MAIN_IP}"
+info " 端口      : 443"
+info " 密码      : ${ANYTLS_PASSWORD}"
+info " SNI       : ${SNI}"
+info " 版本      : ${VERSION}"
+echo "=========================================="
 echo ""
 
-if [ -n "$DOMAIN" ]; then
-    hint "【Cloudflare 配置指引】"
-    echo "1. 在 Cloudflare 添加 A/AAAA 记录："
-    echo "   ${DOMAIN} → ${MAIN_IP}"
-    echo "2. SSL/TLS → 概述 → 加密模式设为：Full"
-    echo "   （注意：不是 Full (Strict)，因为源站使用自签证书）"
-    echo "3. 可选：开启代理（橙色云）隐藏真实 IP"
-    echo ""
-    
-    URI="anytls://${ANYTLS_PASSWORD}@${DOMAIN}:${TLS_PORT}?peer=${DOMAIN}&udp=1#${NODE_NAME// /%20}"
-    hint "【节点链接】"
-    echo "$URI"
-    echo ""
-    
-    hint "【Sing-box 客户端 outbound（CF 代理模式，信任 CF 证书）】"
-    cat << EOF
-{
-    "type": "anytls",
-    "tag": "${NODE_NAME}",
-    "server": "${DOMAIN}",
-    "server_port": ${TLS_PORT},
-    "password": "${ANYTLS_PASSWORD}",
-    "idle_session_check_interval": "30s",
-    "idle_session_timeout": "30s",
-    "min_idle_session": 5,
-    "tls": {
-        "enabled": true,
-        "server_name": "${DOMAIN}",
-        "utls": {
-            "enabled": true,
-            "fingerprint": "chrome"
-        }
-    }
-}
-EOF
-    echo ""
-    
-    hint "【Sing-box 客户端 outbound（直连域名/IP，需导入 CA 证书）】"
-    cat << EOF
+hint "【推荐】Sing-box 客户端配置（证书指纹校验，无需证书文件）"
+cat << EOF
 {
     "type": "anytls",
     "tag": "${NODE_NAME}",
     "server": "${MAIN_IP}",
-    "server_port": ${TLS_PORT},
+    "server_port": 443,
     "password": "${ANYTLS_PASSWORD}",
     "idle_session_check_interval": "30s",
     "idle_session_timeout": "30s",
     "min_idle_session": 5,
     "tls": {
         "enabled": true,
-        "server_name": "${DOMAIN}",
-        "certificate": ["${CA_CERT_JSON}"],
-        "utls": {
-            "enabled": true,
-            "fingerprint": "chrome"
-        }
-    }
-}
-EOF
-    echo ""
-    
-    hint "【CA 证书文件路径】（客户端导入用）"
-    echo "${WORK_DIR}/cert/ca.crt"
-    echo ""
-
-else
-    if [ -n "$IPV4" ]; then
-        URI_V4="anytls://${ANYTLS_PASSWORD}@${IPV4}:${TLS_PORT}?peer=${SNI}&udp=1&hpkp=${SELF_SIGNED_FINGERPRINT_SHA256}#${NODE_NAME// /%20}"
-        hint "【IPv4 节点链接】"
-        echo "$URI_V4"
-        echo ""
-    fi
-
-    if [ -n "$IPV6" ]; then
-        URI_V6="anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${TLS_PORT}?peer=${SNI}&udp=1&hpkp=${SELF_SIGNED_FINGERPRINT_SHA256}#${NODE_NAME// /%20}"
-        hint "【IPv6 节点链接】"
-        echo "$URI_V6"
-        echo ""
-    fi
-
-    hint "【Sing-box 客户端 outbound 配置】"
-    cat << EOF
-{
-    "type": "anytls",
-    "tag": "${NODE_NAME}",
-    "server": "${MAIN_IP}",
-    "server_port": ${TLS_PORT},
-    "password": "${ANYTLS_PASSWORD}",
-    "idle_session_check_interval": "30s",
-    "idle_session_timeout": "30s",
-    "min_idle_session": 5,
-    "tls": {
-        "enabled": true,
-        "certificate_public_key_sha256": ["${SELF_SIGNED_FINGERPRINT_BASE64}"],
         "server_name": "${SNI}",
+        "certificate_public_key_sha256": ["${CERT_FINGERPRINT}"],
         "utls": {
             "enabled": true,
             "fingerprint": "chrome"
@@ -419,7 +274,33 @@ else
     }
 }
 EOF
-    echo ""
-fi
+echo ""
 
-echo "=============================="
+hint "【备用】Sing-box 客户端配置（跳过证书验证，仅测试用）"
+cat << EOF
+{
+    "type": "anytls",
+    "tag": "${NODE_NAME}",
+    "server": "${MAIN_IP}",
+    "server_port": 443,
+    "password": "${ANYTLS_PASSWORD}",
+    "idle_session_check_interval": "30s",
+    "idle_session_timeout": "30s",
+    "min_idle_session": 5,
+    "tls": {
+        "enabled": true,
+        "server_name": "${SNI}",
+        "insecure": true,
+        "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+        }
+    }
+}
+EOF
+echo ""
+
+hint "【节点 URI】"
+echo "anytls://${ANYTLS_PASSWORD}@${MAIN_IP}:443?peer=${SNI}&udp=1&hpkp=${CERT_SHA256}#${NODE_NAME// /%20}"
+echo ""
+echo "=========================================="
