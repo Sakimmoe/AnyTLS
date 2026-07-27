@@ -8,7 +8,7 @@
 
 # ✨ 简介
 
-本项目提供两个 AnyTLS 自动部署脚本：
+本项目提供两个 AnyTLS-go 自动部署脚本：
 
 | 脚本 | 推荐程度 | 特点 | 适合用户 |
 |------|------|------|------|
@@ -47,6 +47,8 @@
 bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls-go)
 ```
 
+---
+
 运行后按照提示输入：
 
 ```text
@@ -55,7 +57,7 @@ bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls-go
 ==========================================
 
 当前服务器 IP:
-100.97.200.10
+1.2.3.4
 
 以下配置直接按回车将使用默认值
 
@@ -70,15 +72,15 @@ bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls-go
 
 ---
 
-## 部署完成示例
+# 📦 部署完成示例
 
 ```text
 ==============================
  AnyTLS 部署完成
 ==============================
 
-IPv4     : 103.97.200.11
-IPv6     : 2a0e:97c0:xxxx::xxxx
+IPv4     : 1.2.3.4
+IPv6     : 2001:db8::1
 Port     : 26216
 Password : xxxxxxxx-xxxx-xxxx-xxxx
 Version  : v0.xx.xx
@@ -92,12 +94,12 @@ Mode     : Dual Stack
 ```text
 IPv4:
 
-anytls://password@103.97.200.11:26216
+anytls://password@1.2.3.4:26216
 
 
 IPv6:
 
-anytls://password@[IPv6]:26216
+anytls://password@[2001:db8::1]:26216
 ```
 
 复制到客户端即可使用。
@@ -119,6 +121,8 @@ anytls://password@[IPv6]:26216
 bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/install.sh)
 ```
 
+---
+
 运行时会额外提示：
 
 ```text
@@ -128,7 +132,7 @@ bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/install.s
 输出示例：
 
 ```text
-anytls://password@103.97.200.11:26216?udp=1#MyNode
+anytls://password@1.2.3.4:26216?udp=1#MyNode
 ```
 
 适合：
@@ -202,11 +206,15 @@ anytls://password@103.97.200.11:26216?udp=1#MyNode
 systemctl status anytls
 ```
 
+---
+
 ## 查看实时日志
 
 ```bash
 journalctl -u anytls -f
 ```
+
+---
 
 ## 重启服务
 
@@ -214,11 +222,15 @@ journalctl -u anytls -f
 systemctl restart anytls
 ```
 
+---
+
 ## 停止服务
 
 ```bash
 systemctl stop anytls
 ```
+
+---
 
 ## 开机启动
 
@@ -333,7 +345,6 @@ anytls-go
 - 自动生成节点
 - 最简单
 
-
 ---
 
 ## 我需要管理多个节点
@@ -349,7 +360,6 @@ install.sh
 - 自定义节点名称
 - URI 更适合订阅
 - 方便长期管理
-
 
 ---
 
