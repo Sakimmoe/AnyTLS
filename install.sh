@@ -17,11 +17,11 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo "📦 安装依赖..."
+echo "安装依赖..."
 apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar >/dev/null 2>&1 || true
 
-echo "🌐 优化网络配置..."
+echo "优化网络配置..."
 grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
 
 systemctl disable systemd-resolved --now >/dev/null 2>&1 || true
@@ -44,7 +44,7 @@ net.ipv4.tcp_congestion_control=bbr
 EOF
 sysctl --system >/dev/null 2>&1 || true
 
-echo "📡 获取服务器 IP..."
+echo "获取服务器 IP..."
 IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org || echo "无")
 IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org || echo "无")
 MAIN_IP=$([ "$IPV4" != "无" ] && echo "$IPV4" || echo "$IPV6")
@@ -55,12 +55,12 @@ else
     LISTEN_ADDR="[::]"
 fi
 
-echo "🚀 部署 AnyTLS..."
+echo "部署 AnyTLS..."
 systemctl stop anytls >/dev/null 2>&1 || true
 sleep 1
 
 if ss -tlnp | grep -q ":${ANYTLS_PORT} "; then
-    echo "❌ 端口 ${ANYTLS_PORT} 已被占用"
+    echo "端口 ${ANYTLS_PORT} 已被占用"
     ss -tlnp | grep ":${ANYTLS_PORT} "
     exit 1
 fi
@@ -68,21 +68,21 @@ fi
 case "$(uname -m)" in
     x86_64|amd64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
-    *) echo "❌ 不支持的架构"; exit 1 ;;
+    *) echo "不支持的架构"; exit 1 ;;
 esac
 
-echo "⬇️ 获取 AnyTLS 最新版本..."
+echo "获取 AnyTLS 最新版本..."
 
 RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 ${GITHUB_API})
 
 VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
 
 if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-    echo "❌ 获取版本失败，请检查网络"
+    echo "获取版本失败，请检查网络"
     exit 1
 fi
 
-echo "📌 当前 AnyTLS 版本: ${VERSION}"
+echo "当前 AnyTLS 版本: ${VERSION}"
 
 ASSET_URL=$(echo "$RELEASE_INFO" \
 | jq -r ".assets[].browser_download_url" \
@@ -92,13 +92,13 @@ ASSET_URL=$(echo "$RELEASE_INFO" \
 | head -1 || true)
 
 if [ -z "$ASSET_URL" ]; then
-    echo "❌ 未找到适用于 Linux ${ARCH} 的下载文件"
+    echo "未找到适用于 Linux ${ARCH} 的下载文件"
     exit 1
 fi
 
 TMP=$(mktemp -d)
 wget --timeout=30 -q -O ${TMP}/anytls.pkg "$ASSET_URL" || {
-    echo "❌ AnyTLS 下载失败"
+    echo "AnyTLS 下载失败"
     rm -rf ${TMP}
     exit 1
 }
@@ -114,7 +114,7 @@ fi
 
 FILE=$(find ${TMP} -type f -name "anytls-server" | head -1)
 if [ -z "$FILE" ]; then
-    echo "❌ 解压后未找到二进制文件"
+    echo "解压后未找到二进制文件"
     rm -rf ${TMP}
     exit 1
 fi
@@ -147,12 +147,12 @@ systemctl restart anytls >/dev/null 2>&1 || true
 sleep 2
 
 if ! systemctl is-active --quiet anytls; then
-    echo "❌ AnyTLS 启动失败"
+    echo "AnyTLS 启动失败"
     journalctl -u anytls -n 20 --no-pager
     exit 1
 fi
 
-echo "🛡️ 配置防火墙..."
+echo "配置防火墙..."
 systemctl unmask ufw >/dev/null 2>&1 || true
 systemctl enable --now ufw >/dev/null 2>&1 || true
 
@@ -177,16 +177,16 @@ ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
 ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
 ufw --force enable >/dev/null 2>&1 || true
 ufw reload >/dev/null 2>&1 || true
-echo "✅ UFW 配置完成"
+echo "UFW 配置完成"
 
-echo "🧹 配置定时清理..."
+echo "配置定时清理..."
 cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
 7 7 * * 0 root /bin/bash -c 'apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete' >/dev/null 2>&1
 CRONEOF
 chmod 644 /etc/cron.d/anytls-cleanup
 
 echo -e "\n=============================="
-echo " ✅ AnyTLS 部署完成"
+echo " AnyTLS 部署完成"
 echo "=============================="
 echo " IPv4     : $IPV4"
 echo " IPv6     : $IPV6"
