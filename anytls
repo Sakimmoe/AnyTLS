@@ -18,7 +18,7 @@ CRON_AUTO="/etc/cron.d/anytls-auto-update"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.0.1"
+SHELL_VERSION="1.0.2"
 
 # ==================== 颜色配置 ====================
 Font="\033[0m"
@@ -828,6 +828,7 @@ uninstall_anytls() {
   rm -f /usr/local/bin/anytls
   rm -f /usr/local/bin/y
   rm -f /usr/local/bin/anytls-panel.sh
+  rm -f "${CONFIG_DIR}/anytls-panel.sh"
   rm -f "$CRON_AUTO" "$CRON_CLEAN"
   rm -rf "$CONFIG_DIR"
 
@@ -837,18 +838,55 @@ uninstall_anytls() {
 
 # ==================== 快捷命令 ====================
 create_shortcut() {
-  # 保存面板脚本自身，供快捷命令调用
-  if [[ -f "$0" ]]; then
-    cp "$0" /usr/local/bin/anytls-panel.sh
-    chmod +x /usr/local/bin/anytls-panel.sh
+  local PANEL="/usr/local/bin/anytls-panel.sh"
+  local SRC=""
+
+  # 尝试多种方式定位脚本源文件（兼容 bash script.sh / bash <(curl) / curl | bash 等）
+  for candidate in "$0" "${BASH_SOURCE[0]:-}"; do
+    if [[ -n "$candidate" && -f "$candidate" && -s "$candidate" ]]; then
+      # 验证是否真的是本脚本（防止 $0 是 /bin/bash）
+      if grep -q "AnyTLS (sing-box) 一键管理脚本" "$candidate" 2>/dev/null; then
+        SRC="$candidate"
+        break
+      fi
+    fi
+  done
+
+  if [[ -n "$SRC" ]]; then
+    # 用 cat 而不是 cp，因为 $0 可能是 /dev/fd/63 这类设备文件
+    cat "$SRC" > "$PANEL"
+    chmod +x "$PANEL"
+    # 同时备份到配置目录，防止 /usr/local/bin 被误删
+    cat "$PANEL" > "${CONFIG_DIR}/anytls-panel.sh" 2>/dev/null || true
+    print_ok "面板脚本已保存"
+  else
+    print_warn "无法自动保存面板脚本（可能通过纯管道执行），建议先保存脚本到本地再运行"
   fi
 
+  # 创建 y 命令，优先查 /usr/local/bin，fallback 到 /etc/anytls
+  cat > /usr/local/bin/y <<'EOF'
+#!/bin/bash
+for path in /usr/local/bin/anytls-panel.sh /etc/anytls/anytls-panel.sh; do
+  if [[ -f "$path" && -s "$path" ]]; then
+    bash "$path"
+    exit 0
+  fi
+done
+echo "未找到 AnyTLS 面板脚本，请重新运行安装脚本"
+exit 1
+EOF
+  chmod +x /usr/local/bin/y
+
+  # anytls 快捷命令
   cat > /usr/local/bin/anytls <<'EOF'
 #!/bin/bash
+PANEL="/usr/local/bin/anytls-panel.sh"
+[[ -f "$PANEL" && -s "$PANEL" ]] || PANEL="/etc/anytls/anytls-panel.sh"
+
 case "${1:-}" in
   -v|--upgrade)
-    if [[ -f /usr/local/bin/anytls-panel.sh ]]; then
-      bash /usr/local/bin/anytls-panel.sh --upgrade
+    if [[ -f "$PANEL" && -s "$PANEL" ]]; then
+      bash "$PANEL" --upgrade
     else
       echo "未找到面板脚本"
     fi
@@ -866,17 +904,6 @@ case "${1:-}" in
 esac
 EOF
   chmod +x /usr/local/bin/anytls
-
-  # 创建 y 命令，直接进入菜单
-  cat > /usr/local/bin/y <<'EOF'
-#!/bin/bash
-if [[ -f /usr/local/bin/anytls-panel.sh ]]; then
-  bash /usr/local/bin/anytls-panel.sh
-else
-  echo "未找到 AnyTLS 面板脚本，请重新运行安装脚本"
-fi
-EOF
-  chmod +x /usr/local/bin/y
 }
 
 # ==================== 主菜单 ====================
