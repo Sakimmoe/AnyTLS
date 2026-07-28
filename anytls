@@ -874,8 +874,6 @@ create_shortcut() {
     chmod +x "$PANEL"
     cat "$PANEL" > "${CONFIG_DIR}/anytls-panel.sh" 2>/dev/null || true
     print_ok "面板脚本已保存"
-  else
-    print_warn "无法自动保存面板脚本（可能通过纯管道执行），建议先保存脚本到本地再运行"
   fi
 
   # 创建 a 命令，优先查 /usr/local/bin，fallback 到 /etc/anytls
