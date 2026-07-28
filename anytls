@@ -22,14 +22,45 @@ ssl_certificate() {
 
   [ ! -d "${WORK_DIR}/cert" ] && mkdir -p "${WORK_DIR}/cert"
 
+  # ==================== 生成 Root CA（如不存在则创建，存在则保留） ====================
+  if [ ! -s "${WORK_DIR}/cert/ca.key" ]; then
+    info "生成 CA 私钥..."
+    openssl ecparam -genkey -name prime256v1 -out "${WORK_DIR}/cert/ca.key"
+  fi
+
+  if [ ! -s "${WORK_DIR}/cert/ca.crt" ]; then
+    info "生成 CA 根证书..."
+    cat > "${WORK_DIR}/cert/ca.conf" << EOF
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_ca
+prompt = no
+
+[req_distinguished_name]
+CN = AnyTLS Root CA
+
+[v3_ca]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+EOF
+    openssl req -new -x509 -days 36500 \
+      -key "${WORK_DIR}/cert/ca.key" \
+      -out "${WORK_DIR}/cert/ca.crt" \
+      -config "${WORK_DIR}/cert/ca.conf"
+    rm -f "${WORK_DIR}/cert/ca.conf"
+  fi
+
+  # ==================== 生成服务器私钥（如不存在则创建） ====================
   if [ ! -s "${WORK_DIR}/cert/private.key" ]; then
+    info "生成服务器私钥..."
     openssl ecparam -genkey -name prime256v1 -out "${WORK_DIR}/cert/private.key"
   fi
 
-  cat > "${WORK_DIR}/cert/cert.conf" << EOF
+  # ==================== 生成 CSR ====================
+  cat > "${WORK_DIR}/cert/server.conf" << EOF
 [req]
 distinguished_name = req_distinguished_name
-x509_extensions = v3_req
+req_extensions = v3_req
 prompt = no
 
 [req_distinguished_name]
@@ -39,16 +70,33 @@ CN = ${CN_DOMAIN}
 subjectAltName = @alt_names
 
 [alt_names]
-DNS = ${TLS_SERVER}
+DNS.1 = ${TLS_SERVER}
 EOF
 
-  openssl req -new -x509 -days 36500 \
+  openssl req -new \
     -key "${WORK_DIR}/cert/private.key" \
-    -out "${WORK_DIR}/cert/cert.pem" \
-    -config "${WORK_DIR}/cert/cert.conf" \
-    -extensions v3_req
+    -out "${WORK_DIR}/cert/server.csr" \
+    -config "${WORK_DIR}/cert/server.conf"
 
-  rm -f "${WORK_DIR}/cert/cert.conf"
+  # ==================== 使用 CA 签发服务器证书 ====================
+  cat > "${WORK_DIR}/cert/ext.conf" << EOF
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:${TLS_SERVER}
+EOF
+
+  openssl x509 -req -days 36500 \
+    -in "${WORK_DIR}/cert/server.csr" \
+    -CA "${WORK_DIR}/cert/ca.crt" \
+    -CAkey "${WORK_DIR}/cert/ca.key" \
+    -CAcreateserial \
+    -out "${WORK_DIR}/cert/cert.pem" \
+    -extfile "${WORK_DIR}/cert/ext.conf"
+
+  # 清理临时文件
+  rm -f "${WORK_DIR}/cert/server.conf" "${WORK_DIR}/cert/server.csr" \
+        "${WORK_DIR}/cert/ext.conf" "${WORK_DIR}/cert/ca.srl"
 }
 
 check_system_ip() {
@@ -58,7 +106,7 @@ check_system_ip() {
 }
 
 echo "=========================================="
-echo " AnyTLS 部署脚本 (sing-box 服务端)"
+echo " AnyTLS 部署脚本 (sing-box 服务端 + 自签 CA)"
 echo "=========================================="
 
 if [ "$EUID" -ne 0 ]; then
@@ -117,7 +165,7 @@ NODE_NAME=${input_name:-$DEFAULT_NAME}
 reading "请输入 SNI 域名 [默认: ${TLS_SERVER}]: " input_sni
 TLS_SERVER=${input_sni:-$TLS_SERVER}
 
-echo "生成自签证书..."
+echo "生成自签 CA 及服务器证书..."
 ssl_certificate "$TLS_SERVER"
 
 SELF_SIGNED_FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${WORK_DIR}/cert/cert.pem" | awk -F '=' '{print $NF}')
@@ -298,6 +346,11 @@ echo ""
 hint "【sing-box 版本信息】"
 echo "${SINGBOX_VERSION}"
 echo ""
+hint "【证书文件位置】"
+info " CA 证书  : ${WORK_DIR}/cert/ca.crt"
+info " 服务器证书: ${WORK_DIR}/cert/cert.pem"
+info " 服务器私钥: ${WORK_DIR}/cert/private.key"
+echo ""
 hint "【AnyTLS 协议信息】"
 info " 类型     : sing-box 内置 inbound 协议"
 info " 版本     : 跟随 sing-box 版本 (无独立版本号)"
@@ -319,7 +372,39 @@ if [ -n "$IPV6" ]; then
     echo ""
 fi
 
-hint "【Sing-box 客户端 outbound 配置】"
+hint "【CA 证书内容】（请保存为 ca.crt 供客户端使用）"
+echo "-----BEGIN CERTIFICATE-----"
+openssl x509 -in "${WORK_DIR}/cert/ca.crt" -noout -text >/dev/null 2>&1
+cat "${WORK_DIR}/cert/ca.crt"
+echo ""
+
+hint "【客户端配置方式一：CA 信任链验证】（推荐）"
+hint "请将上方 CA 证书保存到客户端设备，如 /etc/sing-box/ca.crt"
+cat << EOF
+{
+    "type": "anytls",
+    "tag": "${NODE_NAME}",
+    "server": "${MAIN_IP}",
+    "server_port": ${ANYTLS_PORT},
+    "password": "${ANYTLS_PASSWORD}",
+    "idle_session_check_interval": "30s",
+    "idle_session_timeout": "30s",
+    "min_idle_session": 5,
+    "tls": {
+        "enabled": true,
+        "server_name": "${TLS_SERVER}",
+        "certificate": ["/path/to/ca.crt"],
+        "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+        }
+    }
+}
+EOF
+
+echo ""
+
+hint "【客户端配置方式二：HPKP 证书固定】（无需 CA 证书文件）"
 cat << EOF
 {
     "type": "anytls",
