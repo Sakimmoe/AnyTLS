@@ -17,8 +17,9 @@ LIST_FILE="${CONFIG_DIR}/list"
 CRON_AUTO="/etc/cron.d/anytls-auto-update"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.0.3"
+SHELL_VERSION="1.0.4"
 
 # ==================== 颜色配置 ====================
 Font="\033[0m"
@@ -849,28 +850,22 @@ uninstall_anytls() {
 # ==================== 快捷命令 ====================
 create_shortcut() {
   local PANEL="/usr/local/bin/anytls-panel.sh"
-  local SRC=""
+  mkdir -p "$CONFIG_DIR"
 
-  # 尝试多种方式定位脚本源文件（兼容 bash script.sh / bash <(curl) / curl | bash 等）
-  for candidate in "$0" "${BASH_SOURCE[0]:-}"; do
-    # 关键修复：用 -e -r 代替 -f，/dev/fd/63 这类设备文件也能被识别
-    if [[ -n "$candidate" && -e "$candidate" && -r "$candidate" ]]; then
-      if grep -q "AnyTLS (sing-box) 一键管理脚本" "$candidate" 2>/dev/null; then
-        SRC="$candidate"
-        break
-      fi
-    fi
-  done
+  # 判断 $0 是否为真实的物理文件（而非管道 /dev/fd/*）
+  if [[ -f "$0" && "$0" != "/dev/fd/"* ]] && grep -q "AnyTLS (sing-box) 一键管理脚本" "$0" 2>/dev/null; then
+    cp -f "$0" "$PANEL"
+  else
+    # 从管道或者纯网络拉取运行时，直接通过远程 URL 下载完整脚本存为面板
+    curl -sL "$SCRIPT_URL" -o "$PANEL" 2>/dev/null || wget -qO "$PANEL" "$SCRIPT_URL" 2>/dev/null || true
+  fi
 
-  if [[ -n "$SRC" ]]; then
-    # 用 cat 而不是 cp，因为 $0 可能是 /dev/fd/63 这类设备文件
-    cat "$SRC" > "$PANEL"
+  if [[ -s "$PANEL" ]]; then
     chmod +x "$PANEL"
-    # 同时备份到配置目录，防止 /usr/local/bin 被误删
-    cat "$PANEL" > "${CONFIG_DIR}/anytls-panel.sh" 2>/dev/null || true
+    cp -f "$PANEL" "${CONFIG_DIR}/anytls-panel.sh" 2>/dev/null || true
     print_ok "面板脚本已保存"
   else
-    print_warn "无法自动保存面板脚本（可能通过纯管道执行），建议先保存脚本到本地再运行"
+    print_warn "无法自动保存面板脚本，请检查 GitHub 连接"
   fi
 
   # 创建 a 命令，优先查 /usr/local/bin，fallback 到 /etc/anytls
