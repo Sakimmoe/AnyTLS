@@ -17,7 +17,6 @@ LIST_FILE="${CONFIG_DIR}/list"
 CRON_AUTO="/etc/cron.d/anytls-auto-update"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 TZ_DEFAULT="Asia/Shanghai"
 SHELL_VERSION="1.0.4"
 
@@ -439,7 +438,7 @@ install_anytls() {
   fi
   judge "依赖安装"
 
-  # 网络优化
+  # 网络优化 (开启 IPv4 优先、BBR 及 TCP Fast Open)
   print_info "优化网络配置..."
   grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
   systemctl disable systemd-resolved --now >/dev/null 2>&1 || true
@@ -452,10 +451,13 @@ nameserver 2606:4700:4700::1111
 nameserver 2001:4860:4860::8888
 EOF
   chattr +i /etc/resolv.conf >/dev/null 2>&1 || true
+
   cat > /etc/sysctl.d/99-bbr.conf <<'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_fastopen=3
 EOF
+  sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || true
   sysctl --system >/dev/null 2>&1 || true
 
   # 架构
@@ -514,7 +516,12 @@ EOF
             "listen": "::",
             "listen_port": ${PORT},
             "users": [{ "password": "${PASS}" }],
-            "padding_scheme": [],
+            "padding_scheme": [
+                "stop=3",
+                "0=30-50",
+                "1=100-400",
+                "2=500-900"
+            ],
             "tls": {
                 "enabled": true,
                 "certificate_path": "${CONFIG_DIR}/cert/cert.pem",
@@ -850,22 +857,25 @@ uninstall_anytls() {
 # ==================== 快捷命令 ====================
 create_shortcut() {
   local PANEL="/usr/local/bin/anytls-panel.sh"
-  mkdir -p "$CONFIG_DIR"
+  local SRC=""
 
-  # 判断 $0 是否为真实的物理文件（而非管道 /dev/fd/*）
-  if [[ -f "$0" && "$0" != "/dev/fd/"* ]] && grep -q "AnyTLS (sing-box) 一键管理脚本" "$0" 2>/dev/null; then
-    cp -f "$0" "$PANEL"
-  else
-    # 从管道或者纯网络拉取运行时，直接通过远程 URL 下载完整脚本存为面板
-    curl -sL "$SCRIPT_URL" -o "$PANEL" 2>/dev/null || wget -qO "$PANEL" "$SCRIPT_URL" 2>/dev/null || true
-  fi
+  # 尝试多种方式定位脚本源文件（兼容 bash script.sh / bash <(curl) / curl | bash 等）
+  for candidate in "$0" "${BASH_SOURCE[0]:-}"; do
+    if [[ -n "$candidate" && -e "$candidate" && -r "$candidate" ]]; then
+      if grep -q "AnyTLS (sing-box) 一键管理脚本" "$candidate" 2>/dev/null; then
+        SRC="$candidate"
+        break
+      fi
+    fi
+  done
 
-  if [[ -s "$PANEL" ]]; then
+  if [[ -n "$SRC" ]]; then
+    cat "$SRC" > "$PANEL"
     chmod +x "$PANEL"
-    cp -f "$PANEL" "${CONFIG_DIR}/anytls-panel.sh" 2>/dev/null || true
+    cat "$PANEL" > "${CONFIG_DIR}/anytls-panel.sh" 2>/dev/null || true
     print_ok "面板脚本已保存"
   else
-    print_warn "无法自动保存面板脚本，请检查 GitHub 连接"
+    print_warn "无法自动保存面板脚本（可能通过纯管道执行），建议先保存脚本到本地再运行"
   fi
 
   # 创建 a 命令，优先查 /usr/local/bin，fallback 到 /etc/anytls
