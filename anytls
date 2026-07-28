@@ -18,7 +18,7 @@ CRON_AUTO="/etc/cron.d/anytls-auto-update"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.0.0"
+SHELL_VERSION="1.0.1"
 
 # ==================== 颜色配置 ====================
 Font="\033[0m"
@@ -567,6 +567,9 @@ EOF
   echo ""
   cat "$LIST_FILE"
   hr
+  
+  # 安装完成后先显示节点信息，按回车再进入菜单
+  pause
 }
 
 # ==================== 核心功能：更新 ====================
@@ -823,6 +826,8 @@ uninstall_anytls() {
   print_info "清理文件..."
   rm -f /usr/local/bin/sing-box /usr/local/bin/sing-box.bak
   rm -f /usr/local/bin/anytls
+  rm -f /usr/local/bin/y
+  rm -f /usr/local/bin/anytls-panel.sh
   rm -f "$CRON_AUTO" "$CRON_CLEAN"
   rm -rf "$CONFIG_DIR"
 
@@ -832,6 +837,12 @@ uninstall_anytls() {
 
 # ==================== 快捷命令 ====================
 create_shortcut() {
+  # 保存面板脚本自身，供快捷命令调用
+  if [[ -f "$0" ]]; then
+    cp "$0" /usr/local/bin/anytls-panel.sh
+    chmod +x /usr/local/bin/anytls-panel.sh
+  fi
+
   cat > /usr/local/bin/anytls <<'EOF'
 #!/bin/bash
 case "${1:-}" in
@@ -855,6 +866,17 @@ case "${1:-}" in
 esac
 EOF
   chmod +x /usr/local/bin/anytls
+
+  # 创建 y 命令，直接进入菜单
+  cat > /usr/local/bin/y <<'EOF'
+#!/bin/bash
+if [[ -f /usr/local/bin/anytls-panel.sh ]]; then
+  bash /usr/local/bin/anytls-panel.sh
+else
+  echo "未找到 AnyTLS 面板脚本，请重新运行安装脚本"
+fi
+EOF
+  chmod +x /usr/local/bin/y
 }
 
 # ==================== 主菜单 ====================
