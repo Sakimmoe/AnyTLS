@@ -673,27 +673,33 @@ update_anytls() {
   print_info "检查 sing-box / AnyTLS 更新"
   hr
 
-  if ! is_installed; then
+    if ! is_installed; then
     print_err "AnyTLS 未安装，无法更新"
-    pause
+    if [[ "$AUTO_UPDATE" != true ]]; then
+        pause
+    fi
     return
   fi
 
   local LOCAL_VER=$(get_local_version)
   local REMOTE_VER=$(get_remote_version)
 
-  if [[ -z "$REMOTE_VER" ]]; then
+    if [[ -z "$REMOTE_VER" ]]; then
     print_err "获取在线版本失败，请检查网络"
-    pause
+    if [[ "$AUTO_UPDATE" != true ]]; then
+        pause
+    fi
     return
   fi
 
   echo -e " 本地版本: ${LOCAL_VER}"
   echo -e " 远程版本: ${REMOTE_VER}"
 
-  if [[ "$LOCAL_VER" = "$REMOTE_VER" ]]; then
+    if [[ "$LOCAL_VER" = "$REMOTE_VER" ]]; then
     print_ok "当前已是最新版本"
-    pause
+    if [[ "$AUTO_UPDATE" != true ]]; then
+        pause
+    fi
     return
   fi
 
@@ -720,7 +726,7 @@ update_anytls() {
   if [[ -z "$DOWNLOADED" ]]; then
     print_err "下载失败，恢复旧版本..."
     cp -f /usr/local/bin/sing-box.bak /usr/local/bin/sing-box
-    pause
+    [[ "$AUTO_UPDATE" != true ]] && pause
     return
   fi
 
@@ -729,7 +735,7 @@ update_anytls() {
     if ! /usr/local/bin/sing-box check -c "$CONFIG_JSON" >/dev/null 2>&1; then
       print_err "新版本与当前配置不兼容，恢复旧版本..."
       cp -f /usr/local/bin/sing-box.bak /usr/local/bin/sing-box
-      pause
+      [[ "$AUTO_UPDATE" != true ]] && pause
       return
     fi
   fi
@@ -754,7 +760,7 @@ update_anytls() {
       print_err "恢复后服务仍异常，请检查: journalctl -u anytls -n 30"
     fi
   fi
-  pause
+  [[ "$AUTO_UPDATE" != true ]] && pause
 }
 
 # ==================== 查看配置 ====================
