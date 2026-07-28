@@ -326,12 +326,12 @@ setup_ufw() {
 
 # ==================== 定时任务 ====================
 setup_cron() {
-  print_info "设置定时自动更新（每周日 19:07 上海时间）..."
+  print_info "设置定时自动更新（每周日 7:00 上海时间）..."
   cat > "$CRON_AUTO" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 TZ=Asia/Shanghai
-7 19 * * 0 root /usr/local/bin/anytls -v >> /var/log/anytls-update.log 2>&1 && /usr/local/bin/anytls --cleanup
+0 7 * * 0 root /usr/local/bin/anytls -v >> /var/log/anytls-update.log 2>&1 && /usr/local/bin/anytls --cleanup
 EOF
   chmod 644 "$CRON_AUTO"
 
