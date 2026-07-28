@@ -331,7 +331,8 @@ setup_cron() {
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 TZ=Asia/Shanghai
-0 7 * * 0 root /usr/local/bin/anytls -v >> /var/log/anytls-update.log 2>&1 && /usr/local/bin/anytls --cleanup
+
+0 7 * * 0 root /bin/bash -c '/usr/local/bin/anytls -v >> /var/log/anytls-update.log 2>&1; tail -n 500 /var/log/anytls-update.log > /tmp/anytls-update.log && mv /tmp/anytls-update.log /var/log/anytls-update.log; /usr/local/bin/anytls --cleanup'
 EOF
   chmod 644 "$CRON_AUTO"
 
@@ -449,7 +450,7 @@ PANEL="/usr/local/bin/anytls-panel.sh"
 case "${1:-}" in
   -v|--upgrade)
     if [[ -f "$PANEL" && -s "$PANEL" ]]; then
-      exec bash "$PANEL" --upgrade
+      exec bash "$PANEL" --upgrade --auto
     else
       echo "未找到面板脚本"
     fi
@@ -657,7 +658,17 @@ EOF
 
 # ==================== 核心功能：更新 ====================
 update_anytls() {
-  clear
+
+  local AUTO_UPDATE=false
+
+  if [[ "${1:-}" == "--auto" ]]; then
+    AUTO_UPDATE=true
+  fi
+
+  if [[ "$AUTO_UPDATE" != true ]]; then
+    clear
+  fi
+
   hr
   print_info "检查 sing-box / AnyTLS 更新"
   hr
@@ -686,9 +697,20 @@ update_anytls() {
     return
   fi
 
-  local ans
-  read -rp "是否升级到 ${REMOTE_VER}? [y/N]: " ans
-  [[ ! "${ans:-N}" =~ ^[Yy]$ ]] && { print_info "已取消"; pause; return; }
+    local ans
+
+  if [[ "$AUTO_UPDATE" == true ]]; then
+    ans="y"
+    print_info "自动更新模式，确认升级到 ${REMOTE_VER}"
+  else
+    read -rp "是否升级到 ${REMOTE_VER}? [y/N]: " ans
+  fi
+
+  [[ ! "${ans:-N}" =~ ^[Yy]$ ]] && {
+    print_info "已取消"
+    [[ "$AUTO_UPDATE" != true ]] && pause
+    return
+  }
 
   print_info "备份旧版本..."
   cp -f /usr/local/bin/sing-box /usr/local/bin/sing-box.bak
@@ -959,7 +981,13 @@ main() {
 # 参数入口
 if [[ "${1:-}" == "--upgrade" ]]; then
   ensure_root
-  update_anytls
+
+  if [[ "${2:-}" == "--auto" ]]; then
+    update_anytls --auto
+  else
+    update_anytls
+  fi
+
   exit 0
 fi
 
