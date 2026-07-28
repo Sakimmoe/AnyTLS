@@ -174,7 +174,7 @@ get_arch() {
 # ==================== 证书生成 ====================
 ssl_certificate() {
   local TLS_SERVER="$1"
-  local CN_DOMAIN=$(awk -F . '{print $(NF-1)"."$NF}' <<< "$TLS_SERVER")
+  local CN_DOMAIN="$TLS_SERVER"
   mkdir -p "${CONFIG_DIR}/cert"
 
   if [[ ! -s "${CONFIG_DIR}/cert/ca.key" ]]; then
