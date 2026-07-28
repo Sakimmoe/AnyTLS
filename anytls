@@ -18,7 +18,7 @@ CRON_AUTO="/etc/cron.d/anytls-auto-update"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.0.5-fix1"
+SHELL_VERSION="1.0.5"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -348,7 +348,6 @@ export_client_info() {
   check_system_ip
 
   local FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${CONFIG_DIR}/cert/cert.pem" | awk -F '=' '{print $NF}')
-  local FINGERPRINT_BASE64=$(openssl x509 -in "${CONFIG_DIR}/cert/cert.pem" -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64)
 
   local URI_V4="" URI_V6=""
   [[ -n "$IPV4" ]] && URI_V4="anytls://${PASS}@${IPV4}:${PORT}?peer=${SNI}&udp=1&hpkp=${FINGERPRINT_SHA256}#${NAME// /%20}"
@@ -356,7 +355,6 @@ export_client_info() {
 
   {
     echo "=========== AnyTLS (sing-box) 配置参数 ==========="
-    echo " 代理模式: AnyTLS (sing-box 内置 inbound)"
     echo " 服务器: ${MAIN_IP:-未知}"
     echo " IPv4: ${IPV4:-无}"
     echo " IPv6: ${IPV6:-无}"
@@ -367,45 +365,6 @@ export_client_info() {
     echo "=================================================="
     [[ -n "$URI_V4" ]] && echo -e "\n【IPv4 节点链接】\n${URI_V4}"
     [[ -n "$URI_V6" ]] && echo -e "\n【IPv6 节点链接】\n${URI_V6}"
-    echo -e "\n【CA 证书路径】 ${CONFIG_DIR}/cert/ca.crt"
-    echo -e "\n【客户端配置 - CA 信任链】"
-    cat <<EOF
-{
-    "type": "anytls",
-    "tag": "${NAME}",
-    "server": "${MAIN_IP}",
-    "server_port": ${PORT},
-    "password": "${PASS}",
-    "idle_session_check_interval": "30s",
-    "idle_session_timeout": "30s",
-    "min_idle_session": 5,
-    "tls": {
-        "enabled": true,
-        "server_name": "${SNI}",
-        "certificate": ["${CONFIG_DIR}/cert/ca.crt"],
-        "utls": { "enabled": true, "fingerprint": "chrome" }
-    }
-}
-EOF
-    echo -e "\n【客户端配置 - HPKP 证书固定】"
-    cat <<EOF
-{
-    "type": "anytls",
-    "tag": "${NAME}",
-    "server": "${MAIN_IP}",
-    "server_port": ${PORT},
-    "password": "${PASS}",
-    "idle_session_check_interval": "30s",
-    "idle_session_timeout": "30s",
-    "min_idle_session": 5,
-    "tls": {
-        "enabled": true,
-        "certificate_public_key_sha256": ["${FINGERPRINT_BASE64}"],
-        "server_name": "${SNI}",
-        "utls": { "enabled": true, "fingerprint": "chrome" }
-    }
-}
-EOF
   } > "$LIST_FILE"
 }
 
