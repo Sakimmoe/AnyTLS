@@ -6,7 +6,7 @@
 
 <p align="center">
 
-⭐ **推荐小白用户直接使用 `anytls-go`**
+⭐ **快速上手直接使用 `anytls-go`**
 
 </p>
 
