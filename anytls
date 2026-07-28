@@ -18,7 +18,7 @@ CRON_AUTO="/etc/cron.d/anytls-auto-update"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.0.5"
+SHELL_VERSION="1.0.5-fix1"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -428,25 +428,38 @@ create_shortcut() {
   done
 
   if [[ -n "$SRC" ]]; then
-    cp -f "$SRC" "$PANEL"
-    chmod +x "$PANEL"
-    cp -f "$SRC" "$PANEL_BAK" 2>/dev/null || true
+    # FIX: 避免源文件与目标文件为同一物理文件时 cp 报错退出
+    if [[ "$SRC" -ef "$PANEL" ]] || [[ "$SRC" == "$PANEL" ]]; then
+      chmod +x "$PANEL"
+    else
+      cp -f "$SRC" "$PANEL"
+      chmod +x "$PANEL"
+    fi
+    if [[ ! "$PANEL" -ef "$PANEL_BAK" ]]; then
+      cp -f "$PANEL" "$PANEL_BAK" 2>/dev/null || true
+    fi
     print_ok "面板脚本已成功保存"
   elif [[ -n "${SCRIPT_URL:-}" ]]; then
     print_info "尝试从远程 URL 下载脚本保存面板..."
     if curl -sSL --connect-timeout 10 -o "$PANEL" "$SCRIPT_URL" 2>/dev/null || wget -q -O "$PANEL" "$SCRIPT_URL" 2>/dev/null; then
       chmod +x "$PANEL"
-      cp -f "$PANEL" "$PANEL_BAK" 2>/dev/null || true
+      if [[ ! "$PANEL" -ef "$PANEL_BAK" ]]; then
+        cp -f "$PANEL" "$PANEL_BAK" 2>/dev/null || true
+      fi
       print_ok "已从远程下载并保存面板脚本"
     fi
   fi
 
   # 2. 补全互备路径
   if [[ ! -s "$PANEL" && -s "$PANEL_BAK" ]]; then
-    cp -f "$PANEL_BAK" "$PANEL"
-    chmod +x "$PANEL"
+    if [[ ! "$PANEL_BAK" -ef "$PANEL" ]]; then
+      cp -f "$PANEL_BAK" "$PANEL"
+      chmod +x "$PANEL"
+    fi
   elif [[ -s "$PANEL" && ! -s "$PANEL_BAK" ]]; then
-    cp -f "$PANEL" "$PANEL_BAK"
+    if [[ ! "$PANEL" -ef "$PANEL_BAK" ]]; then
+      cp -f "$PANEL" "$PANEL_BAK"
+    fi
   fi
 
   if [[ ! -s "$PANEL" ]]; then
