@@ -665,6 +665,11 @@ update_anytls() {
     AUTO_UPDATE=true
   fi
 
+  # 确保在自动更新时也有架构变量
+  if [[ -z "${ARCH:-}" ]]; then
+    ARCH=$(get_arch)
+  fi
+
   if [[ "$AUTO_UPDATE" != true ]]; then
     clear
   fi
