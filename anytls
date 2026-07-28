@@ -9,17 +9,19 @@ NODE_NAME=''
 TLS_SERVER='addons.mozilla.org'
 WORK_DIR='/etc/anytls'
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+CRON_FILE='/etc/cron.d/anytls-auto-update'
 
 info() { echo -e "\033[32m\033[01m$*\033[0m"; }
 hint() { echo -e "\033[33m\033[01m$*\033[0m"; }
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }
+error() { echo -e "\033[31m\033[01m$*\033[0m"; exit 1; }
 reading() { read -rp "$(info "$1")" "$2"; }
 
 # ==================== 提前检测架构 ====================
 case "$(uname -m)" in
     x86_64|amd64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
-    *) warning "不支持的架构: $(uname -m)"; exit 1 ;;
+    *) error "不支持的架构: $(uname -m)" ;;
 esac
 
 # ==================== 通用下载 sing-box ====================
@@ -68,16 +70,24 @@ download_singbox() {
     echo "$VER"
 }
 
+# ==================== 清理垃圾 ====================
+cleanup_old() {
+    # 删除旧备份
+    rm -f /usr/local/bin/sing-box.bak
+    # 清理临时目录
+    rm -rf /tmp/sing-box.* /tmp/anytls-* 2>/dev/null || true
+    # 清理 apt 缓存（可选）
+    apt-get clean >/dev/null 2>&1 || true
+}
+
 # ==================== 升级功能 ====================
 upgrade_anytls() {
     if [ "$EUID" -ne 0 ]; then
-        warning "Error: 请使用 root 用户运行"
-        exit 1
+        error "请使用 root 用户运行"
     fi
 
     if [ ! -f /usr/local/bin/sing-box ]; then
-        warning "sing-box 未安装，请先运行安装脚本"
-        exit 1
+        error "sing-box 未安装，请先运行安装脚本"
     fi
 
     info "获取版本信息..."
@@ -85,8 +95,7 @@ upgrade_anytls() {
     local ONLINE_VER=$(curl -s --connect-timeout 10 --max-time 20 "$GITHUB_API" | jq -r '.tag_name' 2>/dev/null | sed 's/^v//')
 
     if [ -z "$ONLINE_VER" ] || [ "$ONLINE_VER" = "null" ]; then
-        warning "获取在线版本失败，请检查网络"
-        exit 1
+        error "获取在线版本失败，请检查网络"
     fi
 
     info "本地版本: ${LOCAL_VER}"
@@ -94,14 +103,16 @@ upgrade_anytls() {
 
     if [ "$LOCAL_VER" = "$ONLINE_VER" ]; then
         info "当前已是最新版本，无需升级"
+        cleanup_old
         exit 0
     fi
 
-    hint ""
-    reading "是否升级到 ${ONLINE_VER} [y/N]: " CONFIRM
-    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-        info "已取消升级"
-        exit 0
+    # 非交互模式（cron）直接升级，交互模式询问
+    if [ -t 0 ]; then
+        reading "是否升级到 ${ONLINE_VER} [y/N]: " CONFIRM
+        [[ "$CONFIRM" =~ ^[Yy]$ ]] || { info "已取消升级"; exit 0; }
+    else
+        info "非交互模式，自动升级中..."
     fi
 
     # 备份旧版本
@@ -114,7 +125,7 @@ upgrade_anytls() {
     if [ -z "$DOWNLOADED_VER" ]; then
         warning "下载失败，正在恢复旧版本..."
         cp -f /usr/local/bin/sing-box.bak /usr/local/bin/sing-box
-        error "升级失败"
+        error "升级失败：下载异常"
     fi
 
     # 检查配置兼容性
@@ -123,7 +134,7 @@ upgrade_anytls() {
         if ! /usr/local/bin/sing-box check -c "${WORK_DIR}/config.json" >/dev/null 2>&1; then
             warning "新版本与当前配置不兼容，正在恢复旧版本..."
             cp -f /usr/local/bin/sing-box.bak /usr/local/bin/sing-box
-            error "升级失败：配置不兼容，建议查看 sing-box release 说明"
+            error "升级失败：配置不兼容，建议查看 sing-box release 说明后手动处理"
         fi
     fi
 
@@ -137,6 +148,7 @@ upgrade_anytls() {
         info "升级成功！当前版本: ${NEW_VER}"
         rm -f /usr/local/bin/sing-box.bak
         echo "${NEW_VER}" > "${WORK_DIR}/.version" 2>/dev/null || true
+        cleanup_old
     else
         warning "新版本启动失败，正在恢复旧版本..."
         cp -f /usr/local/bin/sing-box.bak /usr/local/bin/sing-box
@@ -145,7 +157,7 @@ upgrade_anytls() {
         if systemctl is-active --quiet anytls; then
             info "已恢复旧版本，服务正常运行"
         else
-            warning "恢复后服务仍异常，请手动检查: journalctl -u anytls -n 30"
+            error "恢复后服务仍异常，请手动检查: journalctl -u anytls -n 30"
         fi
         exit 1
     fi
@@ -154,8 +166,7 @@ upgrade_anytls() {
 # ==================== 卸载功能 ====================
 uninstall_anytls() {
     if [ "$EUID" -ne 0 ]; then
-        warning "Error: 请使用 root 用户运行"
-        exit 1
+        error "请使用 root 用户运行"
     fi
     info "停止并卸载 AnyTLS ..."
     systemctl stop anytls >/dev/null 2>&1 || true
@@ -163,6 +174,7 @@ uninstall_anytls() {
     rm -f /etc/systemd/system/anytls.service
     rm -f /usr/local/bin/sing-box /usr/local/bin/sing-box.bak
     rm -f /usr/local/bin/anytls
+    rm -f "$CRON_FILE"
     rm -rf "$WORK_DIR"
     systemctl daemon-reload >/dev/null 2>&1 || true
     info "AnyTLS 已彻底卸载"
@@ -174,32 +186,48 @@ create_shortcut() {
 #!/bin/bash
 set -euo pipefail
 WORK_DIR='/etc/anytls'
+SCRIPT_URL='https://raw.githubusercontent.com/你的仓库/anytls.sh'  # 如需本地离线使用，建议改为本地路径
+
 case "${1:-}" in
     -v|--upgrade)
-        bash <(wget --no-check-certificate -qO- https://raw.githubusercontent.com/你的仓库/anytls.sh) --upgrade
+        if [ -f /usr/local/bin/anytls.sh ]; then
+            bash /usr/local/bin/anytls.sh --upgrade
+        else
+            bash <(wget --no-check-certificate -qO- "$SCRIPT_URL") --upgrade
+        fi
+        ;;
+    --cleanup)
+        rm -f /usr/local/bin/sing-box.bak
+        rm -rf /tmp/sing-box.* /tmp/anytls-* 2>/dev/null || true
+        apt-get clean >/dev/null 2>&1 || true
         ;;
     -n|--node)
         if [ -f "${WORK_DIR}/list" ]; then
             cat "${WORK_DIR}/list"
         else
-            echo "节点信息未生成，请重新运行安装脚本"
+            echo "节点信息未生成"
         fi
         ;;
     -s|--status)
         systemctl status anytls --no-pager
         ;;
     -r|--restart)
-        systemctl restart anytls && echo "AnyTLS 已重启" || echo "重启失败"
+        systemctl restart anytls && info "AnyTLS 已重启" || warning "重启失败"
         ;;
     -u|--uninstall)
-        read -rp "确定卸载 AnyTLS? [y/N]: " c
+        reading "确定卸载 AnyTLS? [y/N]: " c
         if [[ "$c" =~ ^[Yy]$ ]]; then
-            bash <(wget --no-check-certificate -qO- https://raw.githubusercontent.com/你的仓库/anytls.sh) --uninstall
+            if [ -f /usr/local/bin/anytls.sh ]; then
+                bash /usr/local/bin/anytls.sh --uninstall
+            else
+                bash <(wget --no-check-certificate -qO- "$SCRIPT_URL") --uninstall
+            fi
         fi
         ;;
     *)
         echo "AnyTLS 管理命令"
         echo "  anytls -v, --upgrade    升级 sing-box / AnyTLS"
+        echo "  anytls --cleanup        清理旧备份和垃圾文件"
         echo "  anytls -n, --node       查看节点信息"
         echo "  anytls -s, --status     查看运行状态"
         echo "  anytls -r, --restart    重启服务"
@@ -208,28 +236,472 @@ case "${1:-}" in
 esac
 EOF
     chmod +x /usr/local/bin/anytls
-    info "快捷命令 anytls 已创建，可直接运行 anytls -v 升级"
+    info "快捷命令 anytls 已创建"
+}
+
+# ==================== 定时任务：每周日 19:07 上海时间 ====================
+setup_auto_update() {
+    info "设置定时自动更新任务（每周日 19:07 上海时间）..."
+    cat > "$CRON_FILE" << 'CRONEOF'
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+TZ=Asia/Shanghai
+
+# 每周日晚上 19:07 自动升级 AnyTLS（sing-box），并清理旧文件
+7 19 * * 0 root /usr/local/bin/anytls -v >> /var/log/anytls-update.log 2>&1 && /usr/local/bin/anytls --cleanup
+CRONEOF
+    chmod 644 "$CRON_FILE"
+    info "定时任务已写入: $CRON_FILE"
+    hint "执行时间: 每周日 19:07 (Asia/Shanghai)"
+    hint "日志位置: /var/log/anytls-update.log"
+}
+
+# ==================== 证书生成 ====================
+ssl_certificate() {
+  local TLS_SERVER="$1"
+  local CN_DOMAIN
+  CN_DOMAIN=$(awk -F . '{print $(NF-1)"."$NF}' <<< "$TLS_SERVER")
+
+  [ ! -d "${WORK_DIR}/cert" ] && mkdir -p "${WORK_DIR}/cert"
+
+  if [ ! -s "${WORK_DIR}/cert/ca.key" ]; then
+    info "生成 CA 私钥..."
+    openssl ecparam -genkey -name prime256v1 -out "${WORK_DIR}/cert/ca.key"
+  fi
+
+  if [ ! -s "${WORK_DIR}/cert/ca.crt" ]; then
+    info "生成 CA 根证书..."
+    cat > "${WORK_DIR}/cert/ca.conf" << EOF
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_ca
+prompt = no
+
+[req_distinguished_name]
+CN = AnyTLS Root CA
+
+[v3_ca]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+EOF
+    openssl req -new -x509 -days 36500 \
+      -key "${WORK_DIR}/cert/ca.key" \
+      -out "${WORK_DIR}/cert/ca.crt" \
+      -config "${WORK_DIR}/cert/ca.conf"
+    rm -f "${WORK_DIR}/cert/ca.conf"
+  fi
+
+  if [ ! -s "${WORK_DIR}/cert/private.key" ]; then
+    info "生成服务器私钥..."
+    openssl ecparam -genkey -name prime256v1 -out "${WORK_DIR}/cert/private.key"
+  fi
+
+  cat > "${WORK_DIR}/cert/server.conf" << EOF
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+CN = ${CN_DOMAIN}
+
+[v3_req]
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = ${TLS_SERVER}
+EOF
+
+  openssl req -new \
+    -key "${WORK_DIR}/cert/private.key" \
+    -out "${WORK_DIR}/cert/server.csr" \
+    -config "${WORK_DIR}/cert/server.conf"
+
+  cat > "${WORK_DIR}/cert/ext.conf" << EOF
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:${TLS_SERVER}
+EOF
+
+  openssl x509 -req -days 36500 \
+    -in "${WORK_DIR}/cert/server.csr" \
+    -CA "${WORK_DIR}/cert/ca.crt" \
+    -CAkey "${WORK_DIR}/cert/ca.key" \
+    -CAcreateserial \
+    -out "${WORK_DIR}/cert/cert.pem" \
+    -extfile "${WORK_DIR}/cert/ext.conf"
+
+  rm -f "${WORK_DIR}/cert/server.conf" "${WORK_DIR}/cert/server.csr" \
+        "${WORK_DIR}/cert/ext.conf" "${WORK_DIR}/cert/ca.srl"
+}
+
+check_system_ip() {
+  IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "")
+  IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || echo "")
+  MAIN_IP=$([ -n "$IPV4" ] && echo "$IPV4" || echo "$IPV6")
 }
 
 # ==================== 参数解析 ====================
-UPGRADE_MODE=false
-UNINSTALL_MODE=false
 for arg in "$@"; do
     case "$arg" in
-        -v|--upgrade) UPGRADE_MODE=true ;;
-        -u|--uninstall) UNINSTALL_MODE=true ;;
+        -v|--upgrade) upgrade_anytls; exit 0 ;;
+        -u|--uninstall) uninstall_anytls; exit 0 ;;
+        --cleanup) cleanup_old; exit 0 ;;
     esac
 done
 
-if [ "$UPGRADE_MODE" = true ]; then
-    upgrade_anytls
-    exit 0
+# ==================== 安装主流程 ====================
+echo "=========================================="
+echo " AnyTLS 部署脚本 (sing-box 服务端 + 自签 CA)"
+echo "=========================================="
+
+if [ "$EUID" -ne 0 ]; then
+    warning "Error: 请使用 root 用户运行"
+    exit 1
 fi
 
-if [ "$UNINSTALL_MODE" = true ]; then
-    uninstall_anytls
-    exit 0
+echo "安装依赖..."
+apt-get update -qq >/dev/null 2>&1 || true
+apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar openssl >/dev/null 2>&1 || true
+
+echo "优化网络配置..."
+grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
+
+systemctl disable systemd-resolved --now >/dev/null 2>&1 || true
+systemctl mask systemd-resolved >/dev/null 2>&1 || true
+
+chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
+rm -f /etc/resolv.conf >/dev/null 2>&1 || true
+cat > /etc/resolv.conf << EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 2606:4700:4700::1111
+nameserver 2001:4860:4860::8888
+EOF
+chattr +i /etc/resolv.conf >/dev/null 2>&1 || true
+
+cat > /etc/sysctl.d/99-bbr.conf << 'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+sysctl --system >/dev/null 2>&1 || true
+
+check_system_ip
+if [ -z "$MAIN_IP" ]; then
+    warning "无法获取服务器 IP，请检查网络"
+    exit 1
 fi
 
-# ==================== 原有安装流程 ====================
-# （以下保持你原脚本的全部安装逻辑不变，最后追加 create_shortcut）
+hint ""
+hint "当前服务器 IP: ${MAIN_IP}"
+hint "以下配置直接按回车将使用默认值"
+hint ""
+
+reading "请输入 AnyTLS 端口 [默认: 26216]: " input_port
+ANYTLS_PORT=${input_port:-$ANYTLS_PORT}
+
+DEFAULT_PASSWORD=$(cat /proc/sys/kernel/random/uuid)
+reading "请输入 AnyTLS 密码 [默认: ${DEFAULT_PASSWORD}]: " input_pass
+ANYTLS_PASSWORD=${input_pass:-$DEFAULT_PASSWORD}
+
+DEFAULT_NAME=$(hostname 2>/dev/null || echo "AnyTLS")
+reading "请输入节点名称 [默认: ${DEFAULT_NAME}]: " input_name
+NODE_NAME=${input_name:-$DEFAULT_NAME}
+
+reading "请输入 SNI 域名 [默认: ${TLS_SERVER}]: " input_sni
+TLS_SERVER=${input_sni:-$TLS_SERVER}
+
+echo "生成自签 CA 及服务器证书..."
+ssl_certificate "$TLS_SERVER"
+
+SELF_SIGNED_FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${WORK_DIR}/cert/cert.pem" | awk -F '=' '{print $NF}')
+SELF_SIGNED_FINGERPRINT_BASE64=$(openssl x509 -in "${WORK_DIR}/cert/cert.pem" -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64)
+
+echo "部署 sing-box AnyTLS..."
+systemctl stop anytls >/dev/null 2>&1 || true
+sleep 1
+
+if ss -tlnp | grep -q ":${ANYTLS_PORT} "; then
+    warning "端口 ${ANYTLS_PORT} 已被占用"
+    ss -tlnp | grep ":${ANYTLS_PORT} "
+    exit 1
+fi
+
+echo "获取 sing-box 最新版本..."
+RELEASE_INFO=$(curl -s --connect-timeout 10 --max-time 20 "${GITHUB_API}")
+VERSION=$(echo "$RELEASE_INFO" | jq -r '.tag_name' 2>/dev/null || true)
+
+if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+    warning "获取版本失败，请检查网络"
+    exit 1
+fi
+info "当前 sing-box 版本: ${VERSION}"
+
+ASSET_URL=$(echo "$RELEASE_INFO" \
+| jq -r ".assets[].browser_download_url" \
+| grep -i "linux" \
+| grep -i "${ARCH}" \
+| grep -v -i "sha256" \
+| grep -v -i "v3" \
+| head -1 || true)
+
+if [ -z "$ASSET_URL" ]; then
+    warning "未找到适用于 Linux ${ARCH} 的下载文件"
+    exit 1
+fi
+
+TMP=$(mktemp -d)
+wget --timeout=30 -q -O "${TMP}/sing-box.pkg" "$ASSET_URL" || {
+    warning "sing-box 下载失败"
+    rm -rf "${TMP}"
+    exit 1
+}
+
+rm -f /usr/local/bin/sing-box
+if [[ "$ASSET_URL" == *.tar.gz ]]; then
+    tar -xf "${TMP}/sing-box.pkg" -C "${TMP}"
+elif [[ "$ASSET_URL" == *.zip ]]; then
+    unzip -q -o "${TMP}/sing-box.pkg" -d "${TMP}"
+else
+    cp "${TMP}/sing-box.pkg" "${TMP}/sing-box"
+fi
+
+FILE=$(find "${TMP}" -type f -name "sing-box" | head -1)
+if [ -z "$FILE" ]; then
+    warning "解压后未找到二进制文件"
+    rm -rf "${TMP}"
+    exit 1
+fi
+
+cp "$FILE" /usr/local/bin/sing-box
+chmod +x /usr/local/bin/sing-box
+rm -rf "${TMP}"
+
+mkdir -p "${WORK_DIR}"
+
+cat > "${WORK_DIR}/config.json" << EOF
+{
+    "log": {
+        "level": "warn"
+    },
+    "inbounds": [
+        {
+            "type": "anytls",
+            "tag": "anytls-in",
+            "listen": "::",
+            "listen_port": ${ANYTLS_PORT},
+            "users": [
+                {
+                    "password": "${ANYTLS_PASSWORD}"
+                }
+            ],
+            "padding_scheme": [],
+            "tls": {
+                "enabled": true,
+                "certificate_path": "${WORK_DIR}/cert/cert.pem",
+                "key_path": "${WORK_DIR}/cert/private.key"
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct"
+        }
+    ]
+}
+EOF
+
+cat > /etc/systemd/system/anytls.service << EOF
+[Unit]
+Description=AnyTLS Server (sing-box)
+After=network.target
+
+[Service]
+Type=simple
+LimitNOFILE=65535
+ExecStart=/usr/local/bin/sing-box run -c ${WORK_DIR}/config.json
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable anytls >/dev/null 2>&1 || true
+systemctl restart anytls >/dev/null 2>&1 || true
+sleep 2
+
+if ! systemctl is-active --quiet anytls; then
+    warning "AnyTLS 启动失败"
+    journalctl -u anytls -n 20 --no-pager
+    exit 1
+fi
+
+echo "配置防火墙..."
+systemctl unmask ufw >/dev/null 2>&1 || true
+systemctl enable --now ufw >/dev/null 2>&1 || true
+
+ufw --force reset >/dev/null 2>&1 || true
+ufw default deny incoming >/dev/null 2>&1 || true
+ufw default allow outgoing >/dev/null 2>&1 || true
+
+SSH_PORT=""
+if [ -f /etc/ssh/sshd_config ]; then
+    SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config | head -1 | awk '{print $2}' | tr -d '\r\n' || true)
+fi
+if [ -z "$SSH_PORT" ] && [ -d /etc/ssh/sshd_config.d ]; then
+    SSH_PORT=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config.d/*.conf 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r\n' || true)
+fi
+if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]]; then
+    SSH_PORT=22
+fi
+
+ufw allow ${SSH_PORT}/tcp comment 'SSH' >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/tcp comment 'AnyTLS TCP' >/dev/null 2>&1 || true
+ufw allow ${ANYTLS_PORT}/udp comment 'AnyTLS UDP' >/dev/null 2>&1 || true
+ufw --force enable >/dev/null 2>&1 || true
+ufw reload >/dev/null 2>&1 || true
+
+# 基础清理定时任务保留
+cat > /etc/cron.d/anytls-cleanup << 'CRONEOF'
+7 7 * * 0 root /bin/bash -c 'apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete' >/dev/null 2>&1
+CRONEOF
+chmod 644 /etc/cron.d/anytls-cleanup
+
+# 获取 sing-box 完整版本信息
+SINGBOX_VERSION=$(/usr/local/bin/sing-box version 2>/dev/null || echo "unknown")
+
+# 创建快捷命令
+create_shortcut
+
+# 设置自动升级定时任务（每周日 19:07 上海时间）
+setup_auto_update
+
+echo ""
+echo "=============================="
+echo " AnyTLS 部署完成"
+echo "=============================="
+info " IPv4     : ${IPV4:-无}"
+info " IPv6     : ${IPV6:-无}"
+info " Port     : ${ANYTLS_PORT}"
+info " Password : ${ANYTLS_PASSWORD}"
+info " SNI      : ${TLS_SERVER}"
+echo ""
+hint "【sing-box 版本信息】"
+echo "${SINGBOX_VERSION}"
+echo ""
+hint "【证书文件位置】"
+info " CA 证书  : ${WORK_DIR}/cert/ca.crt"
+info " 服务器证书: ${WORK_DIR}/cert/cert.pem"
+info " 服务器私钥: ${WORK_DIR}/cert/private.key"
+echo ""
+hint "【AnyTLS 协议信息】"
+info " 类型     : sing-box 内置 inbound 协议"
+info " 版本     : 跟随 sing-box 版本 (无独立版本号)"
+info " 状态     : 已启用"
+echo "=============================="
+echo ""
+
+if [ -n "$IPV4" ]; then
+    URI_V4="anytls://${ANYTLS_PASSWORD}@${IPV4}:${ANYTLS_PORT}?peer=${TLS_SERVER}&udp=1&hpkp=${SELF_SIGNED_FINGERPRINT_SHA256}#${NODE_NAME// /%20}"
+    hint "【IPv4 节点链接】"
+    echo "$URI_V4"
+    echo ""
+fi
+
+if [ -n "$IPV6" ]; then
+    URI_V6="anytls://${ANYTLS_PASSWORD}@[${IPV6}]:${ANYTLS_PORT}?peer=${TLS_SERVER}&udp=1&hpkp=${SELF_SIGNED_FINGERPRINT_SHA256}#${NODE_NAME// /%20}"
+    hint "【IPv6 节点链接】"
+    echo "$URI_V6"
+    echo ""
+fi
+
+hint "【CA 证书内容】（请保存为 ca.crt 供客户端使用）"
+echo "-----BEGIN CERTIFICATE-----"
+cat "${WORK_DIR}/cert/ca.crt"
+echo ""
+
+hint "【客户端配置方式一：CA 信任链验证】（推荐）"
+hint "请将上方 CA 证书保存到客户端设备，如 /etc/sing-box/ca.crt"
+cat << EOF
+{
+    "type": "anytls",
+    "tag": "${NODE_NAME}",
+    "server": "${MAIN_IP}",
+    "server_port": ${ANYTLS_PORT},
+    "password": "${ANYTLS_PASSWORD}",
+    "idle_session_check_interval": "30s",
+    "idle_session_timeout": "30s",
+    "min_idle_session": 5,
+    "tls": {
+        "enabled": true,
+        "server_name": "${TLS_SERVER}",
+        "certificate": ["/path/to/ca.crt"],
+        "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+        }
+    }
+}
+EOF
+
+echo ""
+
+hint "【客户端配置方式二：HPKP 证书固定】（无需 CA 证书文件）"
+cat << EOF
+{
+    "type": "anytls",
+    "tag": "${NODE_NAME}",
+    "server": "${MAIN_IP}",
+    "server_port": ${ANYTLS_PORT},
+    "password": "${ANYTLS_PASSWORD}",
+    "idle_session_check_interval": "30s",
+    "idle_session_timeout": "30s",
+    "min_idle_session": 5,
+    "tls": {
+        "enabled": true,
+        "certificate_public_key_sha256": ["${SELF_SIGNED_FINGERPRINT_BASE64}"],
+        "server_name": "${TLS_SERVER}",
+        "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+        }
+    }
+}
+EOF
+
+echo ""
+echo "=============================="
+hint "【管理命令】"
+info " anytls -v        手动检查并升级 sing-box / AnyTLS"
+info " anytls --cleanup 手动清理旧备份和垃圾"
+info " anytls -n        查看节点信息"
+info " anytls -s        查看服务状态"
+info " anytls -r        重启服务"
+info " anytls -u        卸载"
+echo ""
+hint "【自动更新】"
+info " 已启用每周日 19:07 (Asia/Shanghai) 自动更新"
+info " 日志: /var/log/anytls-update.log"
+echo "=============================="
+
+# 保存节点信息到文件方便 anytls -n 查看
+cat > "${WORK_DIR}/list" << EOF
+AnyTLS 节点信息
+===============
+服务器: ${MAIN_IP}
+端口: ${ANYTLS_PORT}
+密码: ${ANYTLS_PASSWORD}
+SNI: ${TLS_SERVER}
+
+IPv4: ${IPV4:-无}
+IPv6: ${IPV6:-无}
+
+sing-box 版本: ${SINGBOX_VERSION}
+
+IPv4 链接: ${URI_V4:-无}
+IPv6 链接: ${URI_V6:-无}
+EOF
