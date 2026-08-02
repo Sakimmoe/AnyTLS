@@ -14,7 +14,6 @@ ANYTLS_SERVICE_NAME="anytls.service"
 ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}"
 CONFIG_JSON="${CONFIG_DIR}/config.json"
 LIST_FILE="${CONFIG_DIR}/list"
-CRON_AUTO="/etc/cron.d/anytls-auto-update"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
@@ -326,16 +325,6 @@ setup_ufw() {
 
 # ==================== 定时任务 ====================
 setup_cron() {
-  print_info "设置定时自动更新（每周日 7:00 上海时间）..."
-  cat > "$CRON_AUTO" <<'EOF'
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-TZ=Asia/Shanghai
-
-0 7 * * 0 root /bin/bash -c '/usr/local/bin/anytls -v >> /var/log/anytls-update.log 2>&1; tail -n 500 /var/log/anytls-update.log > /tmp/anytls-update.log && mv /tmp/anytls-update.log /var/log/anytls-update.log; /usr/local/bin/anytls --cleanup'
-EOF
-  chmod 644 "$CRON_AUTO"
-
   cat > "$CRON_CLEAN" <<'EOF'
 7 7 * * 0 root /bin/bash -c 'apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete' >/dev/null 2>&1
 EOF
@@ -942,7 +931,7 @@ uninstall_anytls() {
   rm -f /usr/local/bin/a
   rm -f /usr/local/bin/anytls-panel.sh
   rm -f "${CONFIG_DIR}/anytls-panel.sh"
-  rm -f "$CRON_AUTO" "$CRON_CLEAN"
+  rm -f "$CRON_CLEAN"
   rm -rf "$CONFIG_DIR"
 
   print_ok "AnyTLS 已彻底卸载"
