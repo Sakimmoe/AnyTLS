@@ -352,7 +352,7 @@ EOF
   chmod +x "$CLEAN_SCRIPT"
 
   cat > "$CRON_CLEAN" <<EOF
-7 4 * * 0 root $CLEAN_SCRIPT >/dev/null 2>&1
+7 7 * * 0 root $CLEAN_SCRIPT >/dev/null 2>&1
 EOF
 
   chmod 644 "$CRON_CLEAN"
@@ -521,6 +521,11 @@ install_anytls() {
     yum install -y wget unzip curl firewalld cronie jq tar openssl >/dev/null 2>&1 || true
   fi
   judge "依赖安装"
+
+  # 设置时区为上海
+  print_info "设置时区为 Asia/Shanghai..."
+  timedatectl set-timezone Asia/Shanghai 2>/dev/null || ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+  judge "时区设置"
 
   # 网络优化 (开启 IPv4 优先、BBR 及 TCP Fast Open)
   print_info "优化网络配置..."
