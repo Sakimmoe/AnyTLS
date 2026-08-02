@@ -325,10 +325,37 @@ setup_ufw() {
 
 # ==================== 定时任务 ====================
 setup_cron() {
-  cat > "$CRON_CLEAN" <<'EOF'
-7 7 * * 0 root /bin/bash -c 'apt-get clean && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && journalctl --vacuum-time=5d --vacuum-size=30M && find /tmp /var/tmp -type f -mtime +7 -delete' >/dev/null 2>&1
+  local CLEAN_SCRIPT="/usr/local/bin/anytls-cleanup.sh"
+
+  cat > "$CLEAN_SCRIPT" <<'EOF'
+#!/bin/bash
+
+set -e
+
+apt-get clean >/dev/null 2>&1 || true
+apt-get autoclean -y >/dev/null 2>&1 || true
+
+journalctl --vacuum-time=7d --vacuum-size=50M >/dev/null 2>&1 || true
+
+find /tmp -mindepth 1 -mtime +7 -exec rm -rf {} + >/dev/null 2>&1 || true
+find /var/tmp -mindepth 1 -mtime +7 -exec rm -rf {} + >/dev/null 2>&1 || true
+
+rm -f /usr/local/bin/sing-box.bak >/dev/null 2>&1 || true
+rm -rf /tmp/sing-box.* /tmp/anytls-* >/dev/null 2>&1 || true
+
+systemctl reset-failed >/dev/null 2>&1 || true
+
+exit 0
 EOF
+
+  chmod +x "$CLEAN_SCRIPT"
+
+  cat > "$CRON_CLEAN" <<EOF
+7 4 * * 0 root $CLEAN_SCRIPT >/dev/null 2>&1
+EOF
+
   chmod 644 "$CRON_CLEAN"
+
   judge "定时任务配置"
 }
 
