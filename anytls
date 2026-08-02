@@ -2,6 +2,7 @@
 # AnyTLS (sing-box) 一键管理脚本：安装/更新/查看/更改端口/更改密码/更改SNI/卸载
 # 基于 sing-box 内置 anytls inbound，自签 CA + 证书固定
 # 兼容 Debian/Ubuntu/CentOS，支持 amd64 / arm64
+# 智能双栈：IPv6 入站 + IPv4 出站解锁 / 单栈自适应
 
 set -euo pipefail
 
@@ -14,10 +15,11 @@ ANYTLS_SERVICE_NAME="anytls.service"
 ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}"
 CONFIG_JSON="${CONFIG_DIR}/config.json"
 LIST_FILE="${CONFIG_DIR}/list"
+STACK_FILE="${CONFIG_DIR}/.stack"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.0.5"
+SHELL_VERSION="1.1.0"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -88,14 +90,24 @@ get_remote_version() {
 }
 
 install_status_text() {
+  local stack_info=""
+  if [[ -f "$STACK_FILE" ]]; then
+    local stack=$(cat "$STACK_FILE" 2>/dev/null || echo "")
+    case "$stack" in
+      dual)   stack_info=" | ${Cyan}双栈(ipv6入+ipv4出解锁)${Font}" ;;
+      v4only) stack_info=" | ${Cyan}仅IPv4${Font}" ;;
+      v6only) stack_info=" | ${Cyan}仅IPv6${Font}" ;;
+    esac
+  fi
+
   if is_installed; then
     if is_active; then
-      echo -e "${BGreen}已安装（运行中）${Font}"
+      echo -e "${BGreen}已安装（运行中）${Font}${stack_info}"
     else
       if systemctl is-failed "$ANYTLS_SERVICE_NAME" >/dev/null 2>&1; then
-        echo -e "${BYellow}已安装（上次启动失败）${Font}"
+        echo -e "${BYellow}已安装（上次启动失败）${Font}${stack_info}"
       else
-        echo -e "${BYellow}已安装（已停止）${Font}"
+        echo -e "${BYellow}已安装（已停止）${Font}${stack_info}"
       fi
     fi
   else
@@ -160,6 +172,16 @@ check_system_ip() {
   IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "")
   IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || echo "")
   MAIN_IP=$([ -n "$IPV4" ] && echo "$IPV4" || echo "$IPV6")
+
+  if [[ -n "$IPV4" && -n "$IPV6" ]]; then
+    IP_STACK="dual"
+  elif [[ -n "$IPV4" ]]; then
+    IP_STACK="v4only"
+  elif [[ -n "$IPV6" ]]; then
+    IP_STACK="v6only"
+  else
+    IP_STACK="unknown"
+  fi
 }
 
 get_arch() {
@@ -303,6 +325,12 @@ setup_ufw() {
   print_info "配置防火墙 (UFW)..."
   systemctl unmask ufw >/dev/null 2>&1 || true
   systemctl enable --now ufw >/dev/null 2>&1 || true
+
+  # 确保 IPv6 支持已启用（双栈/仅v6 场景需要）
+  if [[ -f /etc/default/ufw ]]; then
+    sed -i 's/IPV6=no/IPV6=yes/' /etc/default/ufw 2>/dev/null || true
+  fi
+
   ufw --force reset >/dev/null 2>&1 || true
   ufw default deny incoming >/dev/null 2>&1 || true
   ufw default allow outgoing >/dev/null 2>&1 || true
@@ -364,16 +392,15 @@ EOF
 export_client_info() {
   local PORT="$1" PASS="$2" SNI="$3" NAME="$4"
   check_system_ip
+  local STACK_SAVED=""
+  [[ -f "$STACK_FILE" ]] && STACK_SAVED=$(cat "$STACK_FILE" 2>/dev/null || echo "")
 
   local FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${CONFIG_DIR}/cert/cert.pem" | awk -F '=' '{print $NF}')
 
-  local URI_V4="" URI_V6=""
-  [[ -n "$IPV4" ]] && URI_V4="anytls://${PASS}@${IPV4}:${PORT}?peer=${SNI}&udp=1&hpkp=${FINGERPRINT_SHA256}#${NAME// /%20}"
-  [[ -n "$IPV6" ]] && URI_V6="anytls://${PASS}@[${IPV6}]:${PORT}?peer=${SNI}&udp=1&hpkp=${FINGERPRINT_SHA256}#${NAME// /%20}"
-
   {
     echo "=========== AnyTLS (sing-box) 配置参数 ==========="
-    echo " 服务器: ${MAIN_IP:-未知}"
+    echo " 当前网络栈: ${IP_STACK}"
+    [[ -n "$STACK_SAVED" && "$STACK_SAVED" != "$IP_STACK" ]] && echo " 安装时栈类型: ${STACK_SAVED}"
     echo " IPv4: ${IPV4:-无}"
     echo " IPv6: ${IPV6:-无}"
     echo " 端口: ${PORT}"
@@ -381,8 +408,29 @@ export_client_info() {
     echo " SNI: ${SNI}"
     echo " sing-box 版本: $(get_local_version)"
     echo "=================================================="
-    [[ -n "$URI_V4" ]] && echo -e "\n【IPv4 节点链接】\n${URI_V4}"
-    [[ -n "$URI_V6" ]] && echo -e "\n【IPv6 节点链接】\n${URI_V6}"
+
+    if [[ "$IP_STACK" == "dual" || "$IP_STACK" == "v4only" ]]; then
+      [[ -n "$IPV4" ]] && echo -e "\n【IPv4 节点链接】\nanytls://${PASS}@${IPV4}:${PORT}?peer=${SNI}&udp=1&hpkp=${FINGERPRINT_SHA256}#${NAME// /%20}"
+    fi
+
+    if [[ "$IP_STACK" == "dual" || "$IP_STACK" == "v6only" ]]; then
+      [[ -n "$IPV6" ]] && echo -e "\n【IPv6 节点链接】\nanytls://${PASS}@[${IPV6}]:${PORT}?peer=${SNI}&udp=1&hpkp=${FINGERPRINT_SHA256}#${NAME// /%20}"
+    fi
+
+    echo -e "\n【使用说明】"
+    if [[ "$STACK_SAVED" == "dual" ]]; then
+      echo " • 双栈服务器，已配置 DNS ipv4_only 策略"
+      echo " • 无论通过 IPv4 或 IPv6 入站，sing-box 出站均优先走 IPv4（解锁效果更好）"
+      echo " • 建议：客户端优先使用 IPv6 节点连接（线路更快），自动享受 IPv4 解锁"
+      echo " • 保留 IPv4 节点：当客户端处于纯 IPv4 网络时，直接使用 IPv4 节点"
+    elif [[ "$STACK_SAVED" == "v4only" ]]; then
+      echo " • 服务器仅支持 IPv4，入站和出站均走 IPv4"
+    elif [[ "$STACK_SAVED" == "v6only" ]]; then
+      echo " • 服务器仅支持 IPv6，入站和出站均走 IPv6"
+      echo " • 注意：无法提供 IPv4 解锁效果，目标网站需支持 IPv6"
+    else
+      echo " • 未检测到安装时栈类型信息"
+    fi
   } > "$LIST_FILE"
 }
 
@@ -527,9 +575,17 @@ install_anytls() {
   timedatectl set-timezone Asia/Shanghai 2>/dev/null || ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
   judge "时区设置"
 
-  # 网络优化 (开启 IPv4 优先、BBR 及 TCP Fast Open)
+  # 检测网络栈类型
+  check_system_ip
+  [[ "$IP_STACK" == "unknown" ]] && { print_err "无法获取服务器 IP，请检查网络"; exit 1; }
+  echo "$IP_STACK" > "$STACK_FILE"
+
+  # 网络优化
   print_info "优化网络配置..."
-  grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
+  # 双栈或仅v4时保持 v4 优先（确保解锁走 v4）
+  if [[ "$IP_STACK" == "dual" || "$IP_STACK" == "v4only" ]]; then
+    grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
+  fi
   systemctl disable systemd-resolved --now >/dev/null 2>&1 || true
   systemctl mask systemd-resolved >/dev/null 2>&1 || true
   chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
@@ -554,11 +610,18 @@ EOF
   print_info "检测到系统架构: ${BGreen}${ARCH}${Font}"
 
   # 交互输入
-  check_system_ip
-  [[ -z "$MAIN_IP" ]] && { print_err "无法获取服务器 IP"; exit 1; }
-
   echo ""
-  echo -e "当前服务器 IP: ${BGreen}${MAIN_IP}${Font}"
+  if [[ "$IP_STACK" == "dual" ]]; then
+    echo -e "当前服务器 IPv4: ${BGreen}${IPV4}${Font}"
+    echo -e "当前服务器 IPv6: ${BGreen}${IPV6}${Font}"
+    echo -e "栈类型: ${BGreen}双栈 (IPv6 入站 + IPv4 出站解锁)${Font}"
+  elif [[ "$IP_STACK" == "v4only" ]]; then
+    echo -e "当前服务器 IPv4: ${BGreen}${IPV4}${Font}"
+    echo -e "栈类型: ${BGreen}仅 IPv4${Font}"
+  elif [[ "$IP_STACK" == "v6only" ]]; then
+    echo -e "当前服务器 IPv6: ${BGreen}${IPV6}${Font}"
+    echo -e "栈类型: ${BGreen}仅 IPv6${Font}"
+  fi
   echo -e "以下配置直接回车将使用默认值"
   echo ""
 
@@ -593,34 +656,42 @@ EOF
   [[ -z "$VER" ]] && { print_err "下载 sing-box 失败"; exit 1; }
   print_ok "sing-box 已安装: ${VER}"
 
-  # 配置文件
+  # 根据栈类型生成 sing-box 配置
+  local LISTEN_ADDR DNS_SERVERS
+  if [[ "$IP_STACK" == "v4only" ]]; then
+    LISTEN_ADDR="0.0.0.0"
+    DNS_SERVERS='[{ "tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "strategy": "ipv4_only", "detour": "direct" }]'
+  elif [[ "$IP_STACK" == "v6only" ]]; then
+    LISTEN_ADDR="::"
+    DNS_SERVERS='[{ "tag": "dns-remote", "address": "local", "strategy": "ipv6_only", "detour": "direct" }]'
+  else
+    # dual stack: v6 监听（Linux 默认同时接受 v4），DNS 强制 ipv4_only 确保解锁走 v4
+    LISTEN_ADDR="::"
+    DNS_SERVERS='[{ "tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "strategy": "ipv4_only", "detour": "direct" }]'
+  fi
+
   mkdir -p "$CONFIG_DIR"
-  cat > "$CONFIG_JSON" <<EOF
-{
-    "log": { "level": "warn" },
-    "inbounds": [
-        {
-            "type": "anytls",
-            "tag": "anytls-in",
-            "listen": "::",
-            "listen_port": ${PORT},
-            "users": [{ "password": "${PASS}" }],
-            "padding_scheme": [
-                "stop=3",
-                "0=30-50",
-                "1=100-400",
-                "2=500-900"
-            ],
-            "tls": {
-                "enabled": true,
-                "certificate_path": "${CONFIG_DIR}/cert/cert.pem",
-                "key_path": "${CONFIG_DIR}/cert/private.key"
-            }
-        }
-    ],
-    "outbounds": [{ "type": "direct", "tag": "direct" }]
-}
-EOF
+  jq -n \
+    --arg listen "$LISTEN_ADDR" \
+    --argjson port "$PORT" \
+    --arg pass "$PASS" \
+    --arg cert "${CONFIG_DIR}/cert/cert.pem" \
+    --arg key "${CONFIG_DIR}/cert/private.key" \
+    --argjson dns "$DNS_SERVERS" \
+    '{
+      log: { level: "warn" },
+      dns: { servers: $dns, final: "dns-remote" },
+      inbounds: [{
+        type: "anytls",
+        tag: "anytls-in",
+        listen: $listen,
+        listen_port: $port,
+        users: [{ password: $pass }],
+        padding_scheme: ["stop=3","0=30-50","1=100-400","2=500-900"],
+        tls: { enabled: true, certificate_path: $cert, key_path: $key }
+      }],
+      outbounds: [{ type: "direct", tag: "direct" }]
+    }' > "$CONFIG_JSON"
 
   # systemd
   cat > "$ANYTLS_SERVICE_FILE" <<EOF
@@ -669,12 +740,23 @@ EOF
   print_ok "AnyTLS 部署完成"
   hr
   echo -e " sing-box 版本: ${BGreen}$(get_local_version)${Font}"
+  echo -e " 栈类型: ${BGreen}${IP_STACK}${Font}"
+  if [[ "$IP_STACK" == "dual" ]]; then
+    echo -e " 监听地址: ${BGreen}:: (IPv4 + IPv6 双栈入站)${Font}"
+    echo -e " DNS 策略: ${BGreen}ipv4_only (确保 IPv4 出站解锁)${Font}"
+  elif [[ "$IP_STACK" == "v4only" ]]; then
+    echo -e " 监听地址: ${BGreen}0.0.0.0${Font}"
+    echo -e " DNS 策略: ${BGreen}ipv4_only${Font}"
+  elif [[ "$IP_STACK" == "v6only" ]]; then
+    echo -e " 监听地址: ${BGreen}::${Font}"
+    echo -e " DNS 策略: ${BGreen}ipv6_only${Font}"
+  fi
   echo -e " 监听端口: ${BGreen}${PORT}${Font}"
   echo -e " 节点名称: ${BGreen}${NAME}${Font}"
   echo ""
   cat "$LIST_FILE"
   hr
-  
+
   pause
 }
 
