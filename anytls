@@ -20,7 +20,7 @@ STACK_FILE="${CONFIG_DIR}/.stack"
 NAME_FILE="${CONFIG_DIR}/.name"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.1.6"
+SHELL_VERSION="1.1.7"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -560,16 +560,23 @@ install_anytls() {
   if [[ "$IP_STACK" == "dual" || "$IP_STACK" == "v4only" ]]; then
     grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
   fi
+
+  # 先停掉所有会接管 resolv.conf 的服务
   systemctl disable systemd-resolved --now >/dev/null 2>&1 || true
   systemctl mask systemd-resolved >/dev/null 2>&1 || true
-  chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
-  cat > /etc/resolv.conf <<EOF
+  systemctl disable resolvconf --now >/dev/null 2>&1 || true
+  systemctl mask resolvconf >/dev/null 2>&1 || true
+
+  # 直接删掉旧文件（可能是软链接），防止 resolvconf 再次覆盖
+  rm -f /etc/resolv.conf
+
+  # 重新写入
+  cat > /etc/resolv.conf <<'EOF'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 nameserver 2606:4700:4700::1111
 nameserver 2001:4860:4860::8888
 EOF
-  chattr +i /etc/resolv.conf >/dev/null 2>&1 || true
 
   cat > /etc/sysctl.d/99-bbr.conf <<'EOF'
 net.core.default_qdisc=fq
