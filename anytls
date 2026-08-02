@@ -17,9 +17,10 @@ CONFIG_JSON="${CONFIG_DIR}/config.json"
 LIST_FILE="${CONFIG_DIR}/list"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 STACK_FILE="${CONFIG_DIR}/.stack"
+NAME_FILE="${CONFIG_DIR}/.name"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.1.5"
+SHELL_VERSION="1.1.6"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -797,6 +798,9 @@ EOF
   # 快捷命令
   create_shortcut
 
+  # 保存节点名称，避免后续修改时丢失
+  echo "$NAME" > "$NAME_FILE"
+
   # 导出信息
   export_client_info "$PORT" "$PASS" "$SNI" "$NAME"
 
@@ -969,7 +973,7 @@ change_port() {
     print_ok "端口已更新为: ${NEW_PORT}"
     local PASS=$(jq -r '.inbounds[0].users[0].password' "$CONFIG_JSON")
     local SNI=$(openssl x509 -noout -ext subjectAltName -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'DNS:' '/DNS:/{gsub(/,.*/,"",$2); print $2}')
-    local NAME=$(jq -r '.inbounds[0].tag' "$CONFIG_JSON" 2>/dev/null || echo "AnyTLS")
+    local NAME=$(cat "$NAME_FILE" 2>/dev/null || jq -r '.inbounds[0].tag' "$CONFIG_JSON" 2>/dev/null || echo "AnyTLS")
     export_client_info "$NEW_PORT" "$PASS" "${SNI:-addons.mozilla.org}" "$NAME"
   else
     print_err "服务重启失败"
@@ -1007,7 +1011,7 @@ change_password() {
     print_ok "密码已更新"
     local PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_JSON")
     local SNI=$(openssl x509 -noout -ext subjectAltName -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'DNS:' '/DNS:/{gsub(/,.*/,"",$2); print $2}')
-    local NAME=$(jq -r '.inbounds[0].tag' "$CONFIG_JSON" 2>/dev/null || echo "AnyTLS")
+    local NAME=$(cat "$NAME_FILE" 2>/dev/null || jq -r '.inbounds[0].tag' "$CONFIG_JSON" 2>/dev/null || echo "AnyTLS")
     export_client_info "$PORT" "$NEW_PASS" "${SNI:-addons.mozilla.org}" "$NAME"
   else
     print_err "服务重启失败"
@@ -1045,7 +1049,7 @@ change_sni() {
     print_ok "SNI 已更新为: ${NEW_SNI}"
     local PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_JSON")
     local PASS=$(jq -r '.inbounds[0].users[0].password' "$CONFIG_JSON")
-    local NAME=$(jq -r '.inbounds[0].tag' "$CONFIG_JSON" 2>/dev/null || echo "AnyTLS")
+    local NAME=$(cat "$NAME_FILE" 2>/dev/null || jq -r '.inbounds[0].tag' "$CONFIG_JSON" 2>/dev/null || echo "AnyTLS")
     export_client_info "$PORT" "$PASS" "$NEW_SNI" "$NAME"
   else
     print_err "服务重启失败"
@@ -1103,6 +1107,7 @@ uninstall_anytls() {
   rm -f "${CONFIG_DIR}/anytls-panel.sh"
   rm -f "$CRON_CLEAN"
   rm -f /usr/local/bin/anytls-cleanup.sh
+  rm -f "$NAME_FILE"
   rm -rf "$CONFIG_DIR"
 
   print_ok "AnyTLS 已彻底卸载"
