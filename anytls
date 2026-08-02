@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # AnyTLS (sing-box) 一键管理脚本：安装/更新/查看/更改端口/更改密码/更改SNI/卸载
 # 基于 sing-box 内置 anytls inbound，自签 CA + 证书固定
-# 智能双栈：IPv6 入站 + IPv4 出站解锁 / 单栈自适应
+# 智能双栈：IPv6 入站 + IPv4 出站解锁 / 单栈自适应 / 兼容 sing-box 1.12+
 # 兼容 Debian/Ubuntu/CentOS，支持 amd64 / arm64
 
 set -euo pipefail
@@ -19,7 +19,7 @@ CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 STACK_FILE="${CONFIG_DIR}/.stack"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.1.4"
+SHELL_VERSION="1.1.5"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -325,7 +325,6 @@ setup_ufw() {
   print_info "配置防火墙 (UFW)..."
   systemctl unmask ufw >/dev/null 2>&1 || true
   systemctl enable --now ufw >/dev/null 2>&1 || true
-  # 确保 IPv6 支持已启用
   if [[ -f /etc/default/ufw ]]; then
     sed -i 's/IPV6=no/IPV6=yes/' /etc/default/ufw 2>/dev/null || true
   fi
@@ -557,7 +556,6 @@ install_anytls() {
   print_info "优化网络配置..."
   check_system_ip
   [[ "$IP_STACK" == "unknown" ]] && { print_err "无法获取服务器 IP，请检查网络"; exit 1; }
-  # 双栈或仅v4时保持 v4 优先
   if [[ "$IP_STACK" == "dual" || "$IP_STACK" == "v4only" ]]; then
     grep -q "precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
   fi
@@ -631,7 +629,7 @@ EOF
   [[ -z "$VER" ]] && { print_err "下载 sing-box 失败"; exit 1; }
   print_ok "sing-box 已安装: ${VER}"
 
-  # 根据栈类型生成 sing-box 配置
+  # 根据栈类型生成 sing-box 1.12+ 配置
   mkdir -p "$CONFIG_DIR"
   echo "$IP_STACK" > "$STACK_FILE"
 
@@ -639,6 +637,11 @@ EOF
     cat > "$CONFIG_JSON" <<EOF
 {
     "log": { "level": "warn" },
+    "dns": {
+        "servers": [
+            { "tag": "dns-local", "type": "local" }
+        ]
+    },
     "inbounds": [
         {
             "type": "anytls",
@@ -659,13 +662,27 @@ EOF
             }
         }
     ],
-    "outbounds": [{ "type": "direct", "tag": "direct", "domain_strategy": "ipv4_only" }]
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct",
+            "domain_resolver": {
+                "server": "dns-local",
+                "strategy": "ipv4_only"
+            }
+        }
+    ]
 }
 EOF
   elif [[ "$IP_STACK" == "v6only" ]]; then
     cat > "$CONFIG_JSON" <<EOF
 {
     "log": { "level": "warn" },
+    "dns": {
+        "servers": [
+            { "tag": "dns-local", "type": "local" }
+        ]
+    },
     "inbounds": [
         {
             "type": "anytls",
@@ -686,7 +703,16 @@ EOF
             }
         }
     ],
-    "outbounds": [{ "type": "direct", "tag": "direct", "domain_strategy": "ipv6_only" }]
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct",
+            "domain_resolver": {
+                "server": "dns-local",
+                "strategy": "ipv6_only"
+            }
+        }
+    ]
 }
 EOF
   else
@@ -694,6 +720,11 @@ EOF
     cat > "$CONFIG_JSON" <<EOF
 {
     "log": { "level": "warn" },
+    "dns": {
+        "servers": [
+            { "tag": "dns-local", "type": "local" }
+        ]
+    },
     "inbounds": [
         {
             "type": "anytls",
@@ -714,7 +745,16 @@ EOF
             }
         }
     ],
-    "outbounds": [{ "type": "direct", "tag": "direct", "domain_strategy": "ipv4_only" }]
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct",
+            "domain_resolver": {
+                "server": "dns-local",
+                "strategy": "ipv4_only"
+            }
+        }
+    ]
 }
 EOF
   fi
