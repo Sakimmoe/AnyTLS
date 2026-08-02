@@ -19,7 +19,7 @@ STACK_FILE="${CONFIG_DIR}/.stack"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.1.1"
+SHELL_VERSION="1.1.2"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -661,40 +661,108 @@ EOF
   # 保存栈类型标记
   echo "$IP_STACK" > "$STACK_FILE"
 
-  local LISTEN_ADDR DNS_SERVERS
+  # sing-box 1.12+ 新 DNS 格式：使用 type + server，废弃 address 字符串
   if [[ "$IP_STACK" == "v4only" ]]; then
-    LISTEN_ADDR="0.0.0.0"
-    DNS_SERVERS='[{ "tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "strategy": "ipv4_only", "detour": "direct" }]'
+    cat > "$CONFIG_JSON" <<EOF
+{
+    "log": { "level": "warn" },
+    "dns": {
+        "servers": [
+            { "tag": "dns-remote", "type": "https", "server": "1.1.1.1", "strategy": "ipv4_only", "detour": "direct" }
+        ],
+        "final": "dns-remote"
+    },
+    "inbounds": [
+        {
+            "type": "anytls",
+            "tag": "anytls-in",
+            "listen": "0.0.0.0",
+            "listen_port": ${PORT},
+            "users": [{ "password": "${PASS}" }],
+            "padding_scheme": [
+                "stop=3",
+                "0=30-50",
+                "1=100-400",
+                "2=500-900"
+            ],
+            "tls": {
+                "enabled": true,
+                "certificate_path": "${CONFIG_DIR}/cert/cert.pem",
+                "key_path": "${CONFIG_DIR}/cert/private.key"
+            }
+        }
+    ],
+    "outbounds": [{ "type": "direct", "tag": "direct" }]
+}
+EOF
   elif [[ "$IP_STACK" == "v6only" ]]; then
-    LISTEN_ADDR="::"
-    DNS_SERVERS='[{ "tag": "dns-remote", "address": "local", "strategy": "ipv6_only", "detour": "direct" }]'
+    cat > "$CONFIG_JSON" <<EOF
+{
+    "log": { "level": "warn" },
+    "dns": {
+        "servers": [
+            { "tag": "dns-remote", "type": "local", "strategy": "ipv6_only", "detour": "direct" }
+        ],
+        "final": "dns-remote"
+    },
+    "inbounds": [
+        {
+            "type": "anytls",
+            "tag": "anytls-in",
+            "listen": "::",
+            "listen_port": ${PORT},
+            "users": [{ "password": "${PASS}" }],
+            "padding_scheme": [
+                "stop=3",
+                "0=30-50",
+                "1=100-400",
+                "2=500-900"
+            ],
+            "tls": {
+                "enabled": true,
+                "certificate_path": "${CONFIG_DIR}/cert/cert.pem",
+                "key_path": "${CONFIG_DIR}/cert/private.key"
+            }
+        }
+    ],
+    "outbounds": [{ "type": "direct", "tag": "direct" }]
+}
+EOF
   else
     # dual stack: v6 监听（Linux 默认同时接受 v4），DNS 强制 ipv4_only 确保解锁走 v4
-    LISTEN_ADDR="::"
-    DNS_SERVERS='[{ "tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "strategy": "ipv4_only", "detour": "direct" }]'
+    cat > "$CONFIG_JSON" <<EOF
+{
+    "log": { "level": "warn" },
+    "dns": {
+        "servers": [
+            { "tag": "dns-remote", "type": "https", "server": "1.1.1.1", "strategy": "ipv4_only", "detour": "direct" }
+        ],
+        "final": "dns-remote"
+    },
+    "inbounds": [
+        {
+            "type": "anytls",
+            "tag": "anytls-in",
+            "listen": "::",
+            "listen_port": ${PORT},
+            "users": [{ "password": "${PASS}" }],
+            "padding_scheme": [
+                "stop=3",
+                "0=30-50",
+                "1=100-400",
+                "2=500-900"
+            ],
+            "tls": {
+                "enabled": true,
+                "certificate_path": "${CONFIG_DIR}/cert/cert.pem",
+                "key_path": "${CONFIG_DIR}/cert/private.key"
+            }
+        }
+    ],
+    "outbounds": [{ "type": "direct", "tag": "direct" }]
+}
+EOF
   fi
-
-  jq -n \
-    --arg listen "$LISTEN_ADDR" \
-    --argjson port "$PORT" \
-    --arg pass "$PASS" \
-    --arg cert "${CONFIG_DIR}/cert/cert.pem" \
-    --arg key "${CONFIG_DIR}/cert/private.key" \
-    --argjson dns "$DNS_SERVERS" \
-    '{
-      log: { level: "warn" },
-      dns: { servers: $dns, final: "dns-remote" },
-      inbounds: [{
-        type: "anytls",
-        tag: "anytls-in",
-        listen: $listen,
-        listen_port: $port,
-        users: [{ password: $pass }],
-        padding_scheme: ["stop=3","0=30-50","1=100-400","2=500-900"],
-        tls: { enabled: true, certificate_path: $cert, key_path: $key }
-      }],
-      outbounds: [{ type: "direct", tag: "direct" }]
-    }' > "$CONFIG_JSON"
 
   # systemd
   cat > "$ANYTLS_SERVICE_FILE" <<EOF
