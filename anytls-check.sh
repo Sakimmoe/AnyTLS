@@ -104,8 +104,8 @@ check_config() {
     print_info "节点标签: ${tag}"
 
     # 检测 domain_resolver / domain_strategy
-    local has_resolver=$(jq 'has("outbounds") and .outbounds[0]? | has("domain_resolver")' "$CONFIG_JSON" 2>/dev/null || echo "false")
-    local has_strategy=$(jq 'has("outbounds") and .outbounds[0]? | has("domain_strategy")' "$CONFIG_JSON" 2>/dev/null || echo "false")
+    local has_resolver=$(jq 'if has("outbounds") and (.outbounds | length > 0) then (.outbounds[0] | has("domain_resolver")) else false end' "$CONFIG_JSON" 2>/dev/null || echo "false")
+    local has_strategy=$(jq 'if has("outbounds") and (.outbounds | length > 0) then (.outbounds[0] | has("domain_strategy")) else false end' "$CONFIG_JSON" 2>/dev/null || echo "false")
 
     if [[ "$has_resolver" == "true" ]]; then
       local resolver_server=$(jq -r '.outbounds[0].domain_resolver.server' "$CONFIG_JSON" 2>/dev/null || echo "N/A")
