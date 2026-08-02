@@ -19,7 +19,7 @@ STACK_FILE="${CONFIG_DIR}/.stack"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.1.2"
+SHELL_VERSION="1.1.3"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -668,9 +668,10 @@ EOF
     "log": { "level": "warn" },
     "dns": {
         "servers": [
-            { "tag": "dns-remote", "type": "https", "server": "1.1.1.1", "strategy": "ipv4_only", "detour": "direct" }
+            { "tag": "dns-remote", "type": "https", "server": "1.1.1.1", "detour": "direct" }
         ],
-        "final": "dns-remote"
+        "final": "dns-remote",
+        "strategy": "ipv4_only"
     },
     "inbounds": [
         {
@@ -692,7 +693,7 @@ EOF
             }
         }
     ],
-    "outbounds": [{ "type": "direct", "tag": "direct" }]
+    "outbounds": [{ "type": "direct", "tag": "direct", "domain_strategy": "ipv4_only" }]
 }
 EOF
   elif [[ "$IP_STACK" == "v6only" ]]; then
@@ -701,9 +702,10 @@ EOF
     "log": { "level": "warn" },
     "dns": {
         "servers": [
-            { "tag": "dns-remote", "type": "local", "strategy": "ipv6_only", "detour": "direct" }
+            { "tag": "dns-remote", "type": "local", "detour": "direct" }
         ],
-        "final": "dns-remote"
+        "final": "dns-remote",
+        "strategy": "ipv6_only"
     },
     "inbounds": [
         {
@@ -725,7 +727,7 @@ EOF
             }
         }
     ],
-    "outbounds": [{ "type": "direct", "tag": "direct" }]
+    "outbounds": [{ "type": "direct", "tag": "direct", "domain_strategy": "ipv6_only" }]
 }
 EOF
   else
@@ -735,9 +737,10 @@ EOF
     "log": { "level": "warn" },
     "dns": {
         "servers": [
-            { "tag": "dns-remote", "type": "https", "server": "1.1.1.1", "strategy": "ipv4_only", "detour": "direct" }
+            { "tag": "dns-remote", "type": "https", "server": "1.1.1.1", "detour": "direct" }
         ],
-        "final": "dns-remote"
+        "final": "dns-remote",
+        "strategy": "ipv4_only"
     },
     "inbounds": [
         {
@@ -759,7 +762,7 @@ EOF
             }
         }
     ],
-    "outbounds": [{ "type": "direct", "tag": "direct" }]
+    "outbounds": [{ "type": "direct", "tag": "direct", "domain_strategy": "ipv4_only" }]
 }
 EOF
   fi
