@@ -1,426 +1,129 @@
-# AnyTLS 一键部署脚本
-
-> 🚀 基于 AnyTLS-go 的一键部署方案  
-> 专为 Debian / Ubuntu VPS 打造  
-> 支持自动安装、交互式配置、网络优化、生成客户端节点链接。
-
-<p align="center">
-
-⭐ **快速上手直接使用 `anytls-go`**
-
-</p>
-
-
----
-
-# ✨ 项目介绍
-
-本项目提供两个 AnyTLS-go 自动部署脚本：
-
-| 脚本 | 推荐 | 特点 | 适合用户 |
-|----|----|----|----|
-| `anytls-go` | ⭐⭐⭐⭐⭐ 推荐 | 极简交互、自动配置、自动生成节点 | 小白、普通用户 |
-| `anytls` | ⭐⭐⭐⭐ | 更多自定义选项、节点名称、URI格式 | 高级用户 |
-
----
-
-## 为什么推荐 `anytls-go`？
-
-如果你的需求只是：
-
-```
-购买 VPS
- ↓
-安装 AnyTLS
- ↓
-生成节点
- ↓
-手机 / 电脑客户端使用
-```
-
-那么：
-
-✅ 不需要修改配置文件  
-✅ 不需要了解 sing-box  
-✅ 不需要手动生成链接  
-✅ 不需要额外设置 TLS 参数  
-
-
-直接运行：
-
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls-go)
-```
-
-即可完成部署。
-
-
----
-
-# 🚀 快速开始
-
-
-## ⭐ 推荐：anytls-go
-
-使用 root 用户执行：
-
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls-go)
-```
-
-
-脚本会自动完成：
-
-```
-检测系统
-   ↓
-安装依赖
-   ↓
-下载最新版 AnyTLS-go
-   ↓
-配置服务
-   ↓
-开启网络优化
-   ↓
-生成节点链接
-```
-
-
----
-
-# 📌 安装过程示例
-
-
-```text
-==========================================
- AnyTLS 部署脚本
-==========================================
-
-
-当前服务器 IP:
-
-1.2.3.4
-
-
-以下配置直接按回车使用默认值
-
-
-请输入 AnyTLS 端口 [默认: 26216]:
-
-
-请输入 AnyTLS 密码 [默认: 自动生成]:
-
-
-请输入网络模式:
-默认: 双栈
-
-输入4: 仅IPv4
-```
-
-
-普通用户：
-
-一路回车即可。
-
-
----
-
-# 🎉 部署完成示例
-
-
-```text
-================================
- AnyTLS 部署完成
-================================
-
-IPv4:
-1.2.3.4
-
-IPv6:
-2001:db8::1
-
-Port:
-26216
-
-Password:
-xxxxxxxx-xxxx-xxxx-xxxx
-
-Mode:
-Dual Stack
-
-================================
-```
-
-
-自动生成节点：
-
-
-IPv4:
-
-```
-anytls://password@1.2.3.4:26216
-```
-
-
-IPv6:
-
-```
-anytls://password@[2001:db8::1]:26216
-```
-
-
-复制到客户端即可使用。
-
-
-支持：
-
-- sing-box
-- Clash Meta
-- Shadowrocket
-- Quantumult X
-- 其他支持 AnyTLS 的客户端
-
-
----
-
-# 🔧 高级用户：anytls
-
-
-如果你需要：
-
-- 自定义节点名称
-- 自定义 URI 参数
-- 添加节点备注
-- 更方便订阅管理
-
-
-可以使用：
+# AnyTLS 一键部署与管理脚本
+
+一个基于 sing-box 内置 AnyTLS 协议的一键安装/管理脚本，专为 Debian / Ubuntu VPS 设计，支持 IPv4 / IPv6 / 双栈，自动生成客户端节点链接。
+
+> 本项目不包含任何隐私信息、密码、密钥或用户数据；脚本只从 sing-box 官方 GitHub Releases 下载二进制，不会回传任何数据。
+
+## 功能特性
+
+- 一键安装 / 重装 AnyTLS（sing-box）
+- 自动识别 amd64 / arm64 架构
+- 自动生成自签 CA + 服务器证书
+- 自动生成标准 AnyTLS 客户端链接
+- 支持仅 IPv4 / 仅 IPv6 / 双栈（IPv6 入站 + IPv4 出站解锁）
+- BBR + fq + TCP 优化，按内存自动选择参数档位
+- UFW 防火墙自动放行 SSH 和 AnyTLS 端口
+- systemd 服务管理，开机自启
+- 支持修改端口 / 密码 / SNI，并自动更新节点链接
+- 支持一键更新 sing-box（带备份回滚）
+- 每周自动清理系统垃圾
+- 提供 `a` / `anytls` 快捷命令
+
+## 系统要求
+
+- Debian 11+ / Ubuntu 20.04+
+- root 权限
+- amd64 或 arm64 架构
+- 需要在防火墙 / 云安全组放行 AnyTLS TCP 端口
+
+## 快速开始
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls)
 ```
 
+一路回车即可使用默认配置（随机密码、默认端口、双栈）。
 
-示例：
+## 菜单说明
 
-```
-anytls://password@1.2.3.4:26216?udp=1#MyNode
-```
+| 选项 | 功能 |
+| --- | --- |
+| 1 | 安装 / 重装 AnyTLS |
+| 2 | 更新 sing-box / AnyTLS |
+| 3 | 查看节点配置 |
+| 4 | 更改端口 |
+| 5 | 更改密码 |
+| 6 | 更改 SNI / 重新生成证书 |
+| 7 | 重启服务 |
+| 8 | 查看运行状态 |
+| 9 | 卸载 AnyTLS |
+| 10 | 重新应用网络优化 |
+| 0 | 退出 |
 
+## 客户端节点链接
 
-适合：
-
-- 多节点管理
-- 自建机场用户
-- 需要自定义节点信息的用户
-
-
----
-
-# ⚙️ 功能特性
-
-
-## 🚀 AnyTLS 自动部署
-
-- ✅ 自动下载最新版 AnyTLS-go
-- ✅ 自动识别 CPU 架构
-- ✅ 支持 amd64 / x86_64 / arm64
-- ✅ 自动安装服务
-- ✅ systemd 管理
-- ✅ 开机自动启动
-- ✅ 自动生成客户端链接
-
-
----
-
-## 🌐 网络优化
-
-
-自动优化：
-
-- ✅ 开启 BBR
-- ✅ fq 队列调度
-- ✅ TCP 参数优化
-- ✅ DNS 优化
-- ✅ IPv4 / IPv6 双栈支持
-
-
----
-
-## 🔥 防火墙配置
-
-
-自动处理：
-
-- ✅ 安装 UFW
-- ✅ 保留 SSH 端口
-- ✅ 开放 AnyTLS TCP 端口
-- ✅ 开放 AnyTLS UDP 端口
-
-
-避免：
+安装完成后脚本会输出类似格式的链接：
 
 ```
-安装完成后无法 SSH 登录
+anytls://密码@服务器IP:端口?sni=域名&udp=1&insecure=1&allowInsecure=1#节点名称
 ```
 
----
+支持 sing-box、Clash Meta / Mihomo、Shadowrocket、v2rayN 等支持 AnyTLS 的客户端。
 
-## 🧹 自动维护
+> 由于默认使用自签证书，链接中带有 `insecure=1`，这是正常设计。如果需要证书固定，可以使用脚本输出的「证书公钥指纹（sing-box pinSHA256）」，在 sing-box 客户端的 `certificate_public_key_sha256` 中填入。
 
+## 网络优化
 
-自动添加定时任务：
+脚本会自动写入 `/etc/sysctl.d/99-bbr.conf` 并立即生效：
 
-```
-每周清理系统垃圾
-```
+- BBR 拥塞控制 + fq 队列
+- TCP Fast Open
+- MTU 探测、TCP 快速回收、KeepAlive 优化
+- 按内存自动选择缓冲区档位：
 
+| 内存 | TCP 缓冲区上限 | 文件描述符上限 |
+| --- | --- | --- |
+| < 512MB | 8MB | 262144 |
+| 512MB ~ 1GB | 12MB | 524288 |
+| >= 1GB | 16MB | 1048576 |
 
-包括：
+已安装的服务器可以在菜单中选择 `10. 重新应用网络优化`，不会改动端口、密码等配置。
 
-- apt 缓存
-- systemd 日志
-- 临时文件
+## 防火墙说明
 
+- 脚本会启用 UFW，并默认拒绝所有入站，仅放行 SSH 和 AnyTLS 端口。
+- 执行安装 / 改端口时会重置 UFW 规则，请知悉。
+- 如果使用云服务商安全组，请额外放行 AnyTLS 的 TCP 端口。
+- AnyTLS 实际只使用 TCP，UDP 规则保留但非必需。
 
----
+## DNS 说明
 
-# 📁 文件目录
+脚本会禁用并屏蔽 `systemd-resolved` / `resolvconf`，并写入 `1.1.1.1`、`8.8.8.8` 等 DNS，避免 DNS 被覆盖。该操作只适合「服务器仅用于代理」的场景。
 
+## 文件与目录
 
 | 内容 | 路径 |
-|-|-|
-| AnyTLS 程序 | `/usr/local/bin/anytls-server` |
-| 配置文件 | `/etc/anytls` |
+| --- | --- |
+| 主程序 | `/usr/local/bin/sing-box` |
+| 配置文件 | `/etc/anytls/config.json` |
+| 证书目录 | `/etc/anytls/cert/` |
 | systemd 服务 | `/etc/systemd/system/anytls.service` |
-| 自动清理 | `/etc/cron.d/anytls-cleanup` |
+| 定时清理 | `/etc/cron.d/anytls-cleanup` |
+| 节点信息 | `/etc/anytls/list` |
+| 快捷命令 | `/usr/local/bin/a`、`/usr/local/bin/anytls` |
 
+## 卸载
 
----
+运行脚本后选择 `9. 卸载 AnyTLS`，会停止服务并删除相关文件。
 
-# 🛠 服务管理
+## 常见问题
 
+### 支持 CentOS 吗？
 
-## 查看状态
+脚本主要针对 Debian / Ubuntu 开发。CentOS 可以运行，但防火墙部分需要手动使用 firewalld 放行端口。
 
-```bash
-systemctl status anytls
-```
+### 为什么节点链接带 `insecure=1`？
 
+因为默认使用自签证书，客户端需要跳过证书校验。想要更安全，可以使用脚本输出的公钥指纹做证书固定。
 
-## 查看日志
+### 修改端口 / 密码 / SNI 后节点链接会更新吗？
 
-```bash
-journalctl -u anytls -f
-```
+会，脚本会自动重新生成节点信息。
 
+### 脚本会收集我的数据吗？
 
-## 重启
+不会。脚本仅调用公共 IP 查询服务获取服务器公网 IP 用于生成节点链接，不包含任何统计、上报或后门代码。
 
-```bash
-systemctl restart anytls
-```
+## 免责声明
 
-
-## 停止
-
-```bash
-systemctl stop anytls
-```
-
-
-## 开机启动
-
-```bash
-systemctl enable anytls
-```
-
-
----
-
-# 🔄 更新
-
-
-重新执行安装脚本：
-
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls-go)
-```
-
-
-自动完成：
-
-1. 停止旧服务
-2. 下载最新版
-3. 更新程序
-4. 更新配置
-5. 重启服务
-
-
----
-
-# 🗑 卸载
-
-
-```bash
-systemctl stop anytls 2>/dev/null || true
-
-systemctl disable anytls 2>/dev/null || true
-
-rm -f /etc/systemd/system/anytls.service
-
-systemctl daemon-reload
-
-rm -f /usr/local/bin/anytls-server
-
-rm -rf /etc/anytls
-
-rm -f /etc/cron.d/anytls-cleanup
-
-echo "✅ AnyTLS 已完全卸载"
-```
-
-
----
-
-# ⚠️ 注意事项
-
-
-## VPS 要求
-
-推荐：
-
-- Debian 11+
-- Debian 12+
-- Ubuntu 20.04+
-- Ubuntu 22.04+
-- Ubuntu 24.04+
-
-需要：
-
-- root 权限
-- 开放 TCP 端口
-
-
----
-
-# 📄 开源协议
-
-
-本项目仅用于学习和技术交流。
-
-感谢：
-
-- AnyTLS-go 项目
-- sing-box 项目
-
-
----
-
-# ⭐ Star 支持
-
-
-如果这个项目帮助到了你：
-
-欢迎点一个 ⭐ Star 支持项目发展！
-
+本项目仅供学习与技术交流使用，请遵守所在地区法律法规，请勿用于非法用途。
