@@ -20,7 +20,7 @@ STACK_FILE="${CONFIG_DIR}/.stack"
 NAME_FILE="${CONFIG_DIR}/.name"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.1.7"
+SHELL_VERSION="1.1.9"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -197,7 +197,12 @@ get_arch() {
 ssl_certificate() {
   local TLS_SERVER="$1"
   local CN_DOMAIN="$TLS_SERVER"
+  local SAN_KIND="DNS"
   mkdir -p "${CONFIG_DIR}/cert"
+
+  if [[ "$TLS_SERVER" =~ ^[0-9.]+$ || "$TLS_SERVER" =~ : ]]; then
+    SAN_KIND="IP"
+  fi
 
   if [[ ! -s "${CONFIG_DIR}/cert/ca.key" ]]; then
     print_info "生成 CA 私钥..."
@@ -239,7 +244,7 @@ CN = ${CN_DOMAIN}
 [v3_req]
 subjectAltName = @alt_names
 [alt_names]
-DNS.1 = ${TLS_SERVER}
+${SAN_KIND}.1 = ${TLS_SERVER}
 EOF
 
   openssl req -new \
@@ -251,7 +256,7 @@ EOF
 basicConstraints = CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:${TLS_SERVER}
+subjectAltName = ${SAN_KIND}:${TLS_SERVER}
 EOF
 
   openssl x509 -req -days 36500 \
@@ -273,7 +278,7 @@ download_singbox() {
   local TMP_DL=$(mktemp -d)
   local REL VER URL FILE
 
-  REL=$(curl -s --connect-timeout 10 --max-time 20 "$GITHUB_API")
+  REL=$(curl -s --connect-timeout 10 --max-time 20 "$GITHUB_API" 2>/dev/null || true)
   VER=$(echo "$REL" | jq -r '.tag_name' 2>/dev/null || true)
 
   if [[ -z "$VER" || "$VER" = "null" ]]; then
@@ -307,10 +312,21 @@ download_singbox() {
     return 1
   fi
 
-  cp "$FILE" "$DEST_BIN"
-  chmod +x "$DEST_BIN"
+  local TMP_BIN="${DEST_BIN}.tmp.$$"
+  if ! cp "$FILE" "$TMP_BIN"; then
+    rm -rf "$TMP_DL" "$TMP_BIN"
+    return 1
+  fi
+  if ! chmod +x "$TMP_BIN"; then
+    rm -rf "$TMP_DL" "$TMP_BIN"
+    return 1
+  fi
+  if ! mv -f "$TMP_BIN" "$DEST_BIN"; then
+    rm -rf "$TMP_DL" "$TMP_BIN"
+    return 1
+  fi
   rm -rf "$TMP_DL"
-  echo "$VER"
+  echo "$VER" | sed 's/^v//'
 }
 
 # ==================== 清理垃圾 ====================
@@ -323,6 +339,10 @@ cleanup_old() {
 # ==================== 防火墙配置 ====================
 setup_ufw() {
   local PORT="$1"
+  if ! command -v ufw >/dev/null 2>&1; then
+    print_warn "未安装 UFW，跳过防火墙配置；请手动放行端口 ${PORT}/tcp"
+    return 0
+  fi
   print_info "配置防火墙 (UFW)..."
   systemctl unmask ufw >/dev/null 2>&1 || true
   systemctl enable --now ufw >/dev/null 2>&1 || true
@@ -391,11 +411,28 @@ export_client_info() {
   local PORT="$1" PASS="$2" SNI="$3" NAME="$4"
   check_system_ip
 
-  local FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "${CONFIG_DIR}/cert/cert.pem" | awk -F '=' '{print $NF}')
+  local CERT_FILE="${CONFIG_DIR}/cert/cert.pem"
+  local FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "$CERT_FILE" 2>/dev/null | awk -F '=' '{print $NF}' | tr -d ':')
+  local PUBKEY_B64=""
+  if [[ -s "$CERT_FILE" ]] && command -v openssl >/dev/null 2>&1; then
+    PUBKEY_B64=$(openssl x509 -in "$CERT_FILE" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform der 2>/dev/null | openssl dgst -sha256 -binary 2>/dev/null | openssl enc -base64 -A 2>/dev/null)
+  fi
+
+  local PASS_ENC NAME_ENC SNI_ENC
+  if command -v jq >/dev/null 2>&1; then
+    PASS_ENC=$(jq -rn --arg v "$PASS" '$v|@uri')
+    NAME_ENC=$(jq -rn --arg v "$NAME" '$v|@uri')
+    SNI_ENC=$(jq -rn --arg v "$SNI" '$v|@uri')
+  else
+    PASS_ENC="${PASS// /%20}"
+    NAME_ENC="${NAME// /%20}"
+    SNI_ENC="${SNI// /%20}"
+  fi
 
   local URI_V4="" URI_V6=""
-  [[ -n "$IPV4" ]] && URI_V4="anytls://${PASS}@${IPV4}:${PORT}?peer=${SNI}&udp=1&hpkp=${FINGERPRINT_SHA256}#${NAME// /%20}"
-  [[ -n "$IPV6" ]] && URI_V6="anytls://${PASS}@[${IPV6}]:${PORT}?peer=${SNI}&udp=1&hpkp=${FINGERPRINT_SHA256}#${NAME// /%20}"
+  local QUERY="sni=${SNI_ENC}&udp=1&insecure=1&allowInsecure=1"
+  [[ -n "$IPV4" ]] && URI_V4="anytls://${PASS_ENC}@${IPV4}:${PORT}?${QUERY}#${NAME_ENC}"
+  [[ -n "$IPV6" ]] && URI_V6="anytls://${PASS_ENC}@[${IPV6}]:${PORT}?${QUERY}#${NAME_ENC}"
 
   {
     echo "=========== AnyTLS (sing-box) 配置参数 ==========="
@@ -405,8 +442,13 @@ export_client_info() {
     echo " 端口: ${PORT}"
     echo " 密码: ${PASS}"
     echo " SNI: ${SNI}"
+    [[ -n "$FINGERPRINT_SHA256" ]] && echo " 证书指纹 (SHA-256): ${FINGERPRINT_SHA256}"
+    [[ -n "$PUBKEY_B64" ]] && echo " 证书公钥指纹 (sing-box pinSHA256): ${PUBKEY_B64}"
     echo " sing-box 版本: $(get_local_version)"
     echo "=================================================="
+    echo ""
+    echo " 节点链接说明: 自签证书 + insecure=1 可直接导入；"
+    echo " 如需证书固定，请在 sing-box 客户端用 certificate_public_key_sha256 填入上面的 base64 公钥指纹。"
     [[ -n "$URI_V4" ]] && echo -e "\n【IPv4 节点链接】\n${URI_V4}"
     [[ -n "$URI_V6" ]] && echo -e "\n【IPv6 节点链接】\n${URI_V6}"
   } > "$LIST_FILE"
@@ -524,14 +566,14 @@ install_anytls() {
   print_info "开始安装 AnyTLS (sing-box)"
   hr
 
-  # 如果已安装，先停止服务并删除旧二进制
+  # 如果已安装，先停止服务；旧二进制等新版下载成功后再覆盖，避免下载失败时服务不可用
   if is_installed; then
-    print_info "检测到已有安装，先停止服务并清理旧版本..."
+    print_info "检测到已有安装，先停止服务..."
     systemctl stop anytls >/dev/null 2>&1 || true
     systemctl disable anytls >/dev/null 2>&1 || true
-    rm -f /usr/local/bin/sing-box /usr/local/bin/sing-box.bak
+    rm -f /usr/local/bin/sing-box.bak
     sleep 1
-    print_ok "旧版本已清理"
+    print_ok "旧服务已停止"
   fi
 
   # 依赖
@@ -547,6 +589,10 @@ install_anytls() {
     yum install -y wget unzip curl firewalld cronie jq tar openssl >/dev/null 2>&1 || true
   fi
   judge "依赖安装"
+
+  for c in wget unzip curl jq tar openssl; do
+    command -v "$c" >/dev/null 2>&1 || { print_err "缺少必要依赖: $c"; exit 1; }
+  done
 
   # 设置时区为上海
   print_info "设置时区为 Asia/Shanghai..."
@@ -633,8 +679,12 @@ EOF
 
   # 下载 sing-box
   print_info "获取 sing-box 最新版本..."
-  local VER=$(download_singbox /usr/local/bin)
-  [[ -z "$VER" ]] && { print_err "下载 sing-box 失败"; exit 1; }
+  local VER=$(download_singbox /usr/local/bin/sing-box)
+  if [[ -z "$VER" ]]; then
+    print_err "下载 sing-box 失败"
+    systemctl restart anytls >/dev/null 2>&1 || true
+    exit 1
+  fi
   print_ok "sing-box 已安装: ${VER}"
 
   # 根据栈类型生成 sing-box 1.12+ 配置
@@ -827,6 +877,13 @@ EOF
 }
 
 # ==================== 核心功能：更新 ====================
+restore_old_binary() {
+  if [[ -x /usr/local/bin/sing-box.bak ]]; then
+    cp -f /usr/local/bin/sing-box.bak /usr/local/bin/sing-box
+    chmod +x /usr/local/bin/sing-box
+  fi
+}
+
 update_anytls() {
 
   local AUTO_UPDATE=false
@@ -894,13 +951,16 @@ update_anytls() {
   }
 
   print_info "备份旧版本..."
-  cp -f /usr/local/bin/sing-box /usr/local/bin/sing-box.bak
+  rm -f /usr/local/bin/sing-box.bak
+  if [[ -x /usr/local/bin/sing-box ]]; then
+    cp -f /usr/local/bin/sing-box /usr/local/bin/sing-box.bak
+  fi
 
   print_info "下载新版本..."
-  local DOWNLOADED=$(download_singbox /usr/local/bin)
+  local DOWNLOADED=$(download_singbox /usr/local/bin/sing-box)
   if [[ -z "$DOWNLOADED" ]]; then
     print_err "下载失败，恢复旧版本..."
-    cp -f /usr/local/bin/sing-box.bak /usr/local/bin/sing-box
+    restore_old_binary
     [[ "$AUTO_UPDATE" != true ]] && pause
     return
   fi
@@ -909,7 +969,7 @@ update_anytls() {
   if [[ -s "$CONFIG_JSON" ]]; then
     if ! /usr/local/bin/sing-box check -c "$CONFIG_JSON" >/dev/null 2>&1; then
       print_err "新版本与当前配置不兼容，恢复旧版本..."
-      cp -f /usr/local/bin/sing-box.bak /usr/local/bin/sing-box
+      restore_old_binary
       [[ "$AUTO_UPDATE" != true ]] && pause
       return
     fi
@@ -926,7 +986,7 @@ update_anytls() {
     [[ -f "$LIST_FILE" ]] && sed -i "s/sing-box 版本:.*/sing-box 版本: $(get_local_version)/" "$LIST_FILE"
   else
     print_err "新版本启动失败，恢复旧版本..."
-    cp -f /usr/local/bin/sing-box.bak /usr/local/bin/sing-box
+    restore_old_binary
     systemctl restart anytls >/dev/null 2>&1 || true
     sleep 2
     if systemctl is-active --quiet anytls; then
@@ -979,7 +1039,7 @@ change_port() {
   if is_active; then
     print_ok "端口已更新为: ${NEW_PORT}"
     local PASS=$(jq -r '.inbounds[0].users[0].password' "$CONFIG_JSON")
-    local SNI=$(openssl x509 -noout -ext subjectAltName -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'DNS:' '/DNS:/{gsub(/,.*/,"",$2); print $2}')
+    local SNI=$(openssl x509 -noout -subject -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'CN *= *' '/subject=/{print $2}')
     local NAME=$(cat "$NAME_FILE" 2>/dev/null || jq -r '.inbounds[0].tag' "$CONFIG_JSON" 2>/dev/null || echo "AnyTLS")
     export_client_info "$NEW_PORT" "$PASS" "${SNI:-addons.mozilla.org}" "$NAME"
   else
@@ -1017,7 +1077,7 @@ change_password() {
   if is_active; then
     print_ok "密码已更新"
     local PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_JSON")
-    local SNI=$(openssl x509 -noout -ext subjectAltName -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'DNS:' '/DNS:/{gsub(/,.*/,"",$2); print $2}')
+    local SNI=$(openssl x509 -noout -subject -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'CN *= *' '/subject=/{print $2}')
     local NAME=$(cat "$NAME_FILE" 2>/dev/null || jq -r '.inbounds[0].tag' "$CONFIG_JSON" 2>/dev/null || echo "AnyTLS")
     export_client_info "$PORT" "$NEW_PASS" "${SNI:-addons.mozilla.org}" "$NAME"
   else
@@ -1039,7 +1099,7 @@ change_sni() {
     return
   fi
 
-  local CUR_SNI=$(openssl x509 -noout -ext subjectAltName -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'DNS:' '/DNS:/{gsub(/,.*/,"",$2); print $2}')
+  local CUR_SNI=$(openssl x509 -noout -subject -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'CN *= *' '/subject=/{print $2}')
   local input
   read -rp "请输入新 SNI [当前: ${CUR_SNI:-addons.mozilla.org}]: " input
   local NEW_SNI=${input:-${CUR_SNI:-addons.mozilla.org}}
