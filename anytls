@@ -19,9 +19,10 @@ CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 STACK_FILE="${CONFIG_DIR}/.stack"
 NAME_FILE="${CONFIG_DIR}/.name"
 CERT_MODE_FILE="${CONFIG_DIR}/.cert_mode"
+NET_NOFILE_LIMIT=1048576
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.3.0"
+SHELL_VERSION="1.3.2"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -617,59 +618,29 @@ EOF
 }
 
 # ==================== 核心功能：安装 ====================
-detect_network_tuning() {
-  NET_MEM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)
-  NET_MEM_MB=${NET_MEM_MB:-1024}
-  if (( NET_MEM_MB < 512 )); then
-    NET_BUF_MAX=8388608
-    NET_FILE_MAX=262144
-  elif (( NET_MEM_MB < 1024 )); then
-    NET_BUF_MAX=12582912
-    NET_FILE_MAX=524288
-  else
-    NET_BUF_MAX=16777216
-    NET_FILE_MAX=1048576
-  fi
-  NET_NOFILE_LIMIT=$NET_FILE_MAX
-}
-
 apply_network_optimization() {
-  detect_network_tuning
-  print_info "检测到内存: ${NET_MEM_MB} MB，TCP 缓冲区上限: $((NET_BUF_MAX/1024/1024)) MB，文件描述符上限: ${NET_FILE_MAX}"
+  # 删除旧的 sysctl.d 配置，统一写入 /etc/sysctl.conf
+  rm -f /etc/sysctl.d/99-bbr.conf
 
-  cat > /etc/sysctl.d/99-bbr.conf <<EOF
-# AnyTLS / sing-box 网络优化
-# BBR 拥塞控制
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-# TCP Fast Open
-net.ipv4.tcp_fastopen=3
-# TCP 常规优化
-net.ipv4.tcp_slow_start_after_idle=0
-net.ipv4.tcp_mtu_probing=1
-net.ipv4.tcp_fin_timeout=15
-net.ipv4.tcp_keepalive_time=600
-net.ipv4.tcp_keepalive_intvl=30
-net.ipv4.tcp_keepalive_probes=3
-net.ipv4.tcp_tw_reuse=1
-net.ipv4.tcp_max_syn_backlog=8192
-net.ipv4.tcp_syncookies=1
-net.core.somaxconn=4096
-net.core.netdev_max_backlog=16384
-# Socket / TCP 缓冲区
-net.core.rmem_max=${NET_BUF_MAX}
-net.core.wmem_max=${NET_BUF_MAX}
-net.ipv4.tcp_rmem=4096 87380 ${NET_BUF_MAX}
-net.ipv4.tcp_wmem=4096 65536 ${NET_BUF_MAX}
-# 本地出站端口范围
-net.ipv4.ip_local_port_range=1024 65535
-# 文件描述符上限
-fs.file-max=${NET_FILE_MAX}
+  cat > /etc/sysctl.conf <<'EOF'
+net.core.default_qdisc = fq
+net.core.rmem_max = 67108848
+net.core.wmem_max = 67108848
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 4096
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_rmem = 16384 16777216 536870912
+net.ipv4.tcp_wmem = 16384 16777216 536870912
+net.ipv4.tcp_adv_win_scale = -2
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_timestamps = 1
+kernel.panic = -1
+vm.swappiness = 9
+net.ipv4.tcp_fastopen = 3
 EOF
 
-  if ! sysctl --system >/dev/null 2>&1; then
-    print_warn "部分内核参数未能生效，请检查内核版本或手动执行 sysctl --system 查看错误"
-  fi
+  sysctl -p >/dev/null 2>&1 || print_warn "sysctl -p 有参数未能生效，请手动执行 sysctl -p 查看错误"
+  sysctl --system >/dev/null 2>&1 || print_warn "sysctl --system 有参数未能生效，请手动执行 sysctl --system 查看错误"
 
   if [[ -f "$ANYTLS_SERVICE_FILE" ]] && grep -q '^LimitNOFILE=' "$ANYTLS_SERVICE_FILE"; then
     sed -i "s/^LimitNOFILE=.*/LimitNOFILE=${NET_NOFILE_LIMIT}/" "$ANYTLS_SERVICE_FILE"
@@ -856,6 +827,7 @@ EOF
             "tag": "anytls-in",
             "listen": "0.0.0.0",
             "listen_port": ${PORT},
+            "tcp_fast_open": true,
             "users": [{ "password": "${PASS}" }],
             "padding_scheme": [
                 "stop=3",
@@ -893,6 +865,7 @@ EOF
             "tag": "anytls-in",
             "listen": "::",
             "listen_port": ${PORT},
+            "tcp_fast_open": true,
             "users": [{ "password": "${PASS}" }],
             "padding_scheme": [
                 "stop=3",
@@ -931,6 +904,7 @@ EOF
             "tag": "anytls-in",
             "listen": "::",
             "listen_port": ${PORT},
+            "tcp_fast_open": true,
             "users": [{ "password": "${PASS}" }],
             "padding_scheme": [
                 "stop=3",
@@ -956,7 +930,6 @@ EOF
   fi
 
   # systemd
-  detect_network_tuning
   cat > "$ANYTLS_SERVICE_FILE" <<EOF
 [Unit]
 Description=AnyTLS Server (sing-box)

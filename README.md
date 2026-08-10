@@ -12,7 +12,7 @@
 - 可选使用自己的域名 + Let's Encrypt 真实证书（自动申请、自动续期）
 - 自动生成标准 AnyTLS 客户端链接
 - 支持仅 IPv4 / 仅 IPv6 / 双栈（IPv6 入站 + IPv4 出站解锁）
-- BBR + fq + TCP 优化，按内存自动选择参数档位
+- BBR + fq + TCP 优化，并开启 TCP Fast Open
 - UFW 防火墙自动放行 SSH 和 AnyTLS 端口
 - systemd 服务管理，开机自启
 - 支持修改端口 / 密码 / SNI，并自动更新节点链接
@@ -73,18 +73,12 @@ anytls://密码@服务器IP:端口?sni=域名&udp=1&insecure=1&allowInsecure=1#�
 
 ## 网络优化
 
-脚本会自动写入 `/etc/sysctl.d/99-bbr.conf` 并立即生效：
+脚本会统一写入 `/etc/sysctl.conf` 并立即生效：
 
 - BBR 拥塞控制 + fq 队列
-- TCP Fast Open
-- MTU 探测、TCP 快速回收、KeepAlive 优化
-- 按内存自动选择缓冲区档位：
-
-| 内存 | TCP 缓冲区上限 | 文件描述符上限 |
-| --- | --- | --- |
-| < 512MB | 8MB | 262144 |
-| 512MB ~ 1GB | 12MB | 524288 |
-| >= 1GB | 16MB | 1048576 |
+- TCP Fast Open（内核 `tcp_fastopen=3` + sing-box `tcp_fast_open: true`）
+- 大缓冲区、高并发连接优化
+- 同时清理旧的 `/etc/sysctl.d/99-bbr.conf`，避免配置冲突
 
 已安装的服务器可以在菜单中选择 `10. 重新应用网络优化`，不会改动端口、密码等配置。
 
