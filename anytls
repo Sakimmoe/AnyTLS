@@ -18,9 +18,10 @@ LIST_FILE="${CONFIG_DIR}/list"
 CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 STACK_FILE="${CONFIG_DIR}/.stack"
 NAME_FILE="${CONFIG_DIR}/.name"
+CERT_MODE_FILE="${CONFIG_DIR}/.cert_mode"
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.2.3"
+SHELL_VERSION="1.3.0"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -191,6 +192,32 @@ get_arch() {
     aarch64|arm64) echo "arm64" ;;
     *) print_err "不支持的架构: $(uname -m)"; exit 1 ;;
   esac
+}
+
+# ==================== 证书模式 ====================
+get_cert_mode() {
+  cat "$CERT_MODE_FILE" 2>/dev/null || echo "selfsigned"
+}
+
+get_current_sni() {
+  if [[ "$(get_cert_mode)" == "acme" ]]; then
+    jq -r '.inbounds[0].tls.certificate_provider.domain[0] // .inbounds[0].tls.acme.domain[0] // empty' "$CONFIG_JSON" 2>/dev/null
+  else
+    openssl x509 -noout -subject -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'CN *= *' '/subject=/{print $2}'
+  fi
+}
+
+build_tls_json() {
+  local CORE_MINOR=$(echo "$VER" | cut -d. -f2)
+  if [[ "$CERT_MODE" == "acme" ]]; then
+    if [[ "${CORE_MINOR:-0}" -ge 14 ]]; then
+      TLS_JSON="\"tls\": { \"enabled\": true, \"certificate_provider\": { \"type\": \"acme\", \"domain\": [\"${TLS_DOMAIN}\"], \"data_directory\": \"${CONFIG_DIR}/certmagic\" } }"
+    else
+      TLS_JSON="\"tls\": { \"enabled\": true, \"acme\": { \"domain\": [\"${TLS_DOMAIN}\"], \"data_directory\": \"${CONFIG_DIR}/certmagic\" } }"
+    fi
+  else
+    TLS_JSON="\"tls\": { \"enabled\": true, \"certificate_path\": \"${CONFIG_DIR}/cert/cert.pem\", \"key_path\": \"${CONFIG_DIR}/cert/private.key\" }"
+  fi
 }
 
 # ==================== 证书生成 ====================
@@ -367,6 +394,10 @@ setup_ufw() {
   ufw allow "${SSH_PORT}/tcp" comment 'SSH' >/dev/null 2>&1 || true
   ufw allow "${PORT}/tcp" comment 'AnyTLS TCP' >/dev/null 2>&1 || true
   ufw allow "${PORT}/udp" comment 'AnyTLS UDP' >/dev/null 2>&1 || true
+  if [[ "$(get_cert_mode)" == "acme" ]]; then
+    ufw allow 80/tcp comment 'ACME HTTP' >/dev/null 2>&1 || true
+    ufw allow 443/tcp comment 'ACME TLS' >/dev/null 2>&1 || true
+  fi
   ufw --force enable >/dev/null 2>&1 || true
   ufw reload >/dev/null 2>&1 || true
   judge "UFW 防火墙配置"
@@ -421,11 +452,14 @@ export_client_info() {
   local PORT="$1" PASS="$2" SNI="$3" NAME="$4"
   check_system_ip
 
-  local CERT_FILE="${CONFIG_DIR}/cert/cert.pem"
-  local FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "$CERT_FILE" 2>/dev/null | awk -F '=' '{print $NF}' | tr -d ':')
-  local PUBKEY_B64=""
-  if [[ -s "$CERT_FILE" ]] && command -v openssl >/dev/null 2>&1; then
-    PUBKEY_B64=$(openssl x509 -in "$CERT_FILE" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform der 2>/dev/null | openssl dgst -sha256 -binary 2>/dev/null | openssl enc -base64 -A 2>/dev/null)
+  local CERT_MODE_NOW=$(get_cert_mode)
+  local FINGERPRINT_SHA256="" PUBKEY_B64=""
+  if [[ "$CERT_MODE_NOW" != "acme" ]]; then
+    local CERT_FILE="${CONFIG_DIR}/cert/cert.pem"
+    FINGERPRINT_SHA256=$(openssl x509 -fingerprint -noout -sha256 -in "$CERT_FILE" 2>/dev/null | awk -F '=' '{print $NF}' | tr -d ':')
+    if [[ -s "$CERT_FILE" ]] && command -v openssl >/dev/null 2>&1; then
+      PUBKEY_B64=$(openssl x509 -in "$CERT_FILE" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform der 2>/dev/null | openssl dgst -sha256 -binary 2>/dev/null | openssl enc -base64 -A 2>/dev/null)
+    fi
   fi
 
   local PASS_ENC NAME_ENC SNI_ENC
@@ -440,7 +474,10 @@ export_client_info() {
   fi
 
   local URI_V4="" URI_V6=""
-  local QUERY="sni=${SNI_ENC}&udp=1&insecure=1&allowInsecure=1"
+  local QUERY="sni=${SNI_ENC}&udp=1"
+  if [[ "$CERT_MODE_NOW" != "acme" ]]; then
+    QUERY="${QUERY}&insecure=1&allowInsecure=1"
+  fi
   [[ -n "$IPV4" ]] && URI_V4="anytls://${PASS_ENC}@${IPV4}:${PORT}?${QUERY}#${NAME_ENC}"
   [[ -n "$IPV6" ]] && URI_V6="anytls://${PASS_ENC}@[${IPV6}]:${PORT}?${QUERY}#${NAME_ENC}"
 
@@ -452,13 +489,21 @@ export_client_info() {
     echo " 端口: ${PORT}"
     echo " 密码: ${PASS}"
     echo " SNI: ${SNI}"
-    [[ -n "$FINGERPRINT_SHA256" ]] && echo " 证书指纹 (SHA-256): ${FINGERPRINT_SHA256}"
-    [[ -n "$PUBKEY_B64" ]] && echo " 证书公钥指纹 (sing-box pinSHA256): ${PUBKEY_B64}"
+    if [[ "$CERT_MODE_NOW" == "acme" ]]; then
+      echo " 证书: Let's Encrypt 自动续期"
+    else
+      [[ -n "$FINGERPRINT_SHA256" ]] && echo " 证书指纹 (SHA-256): ${FINGERPRINT_SHA256}"
+      [[ -n "$PUBKEY_B64" ]] && echo " 证书公钥指纹 (sing-box pinSHA256): ${PUBKEY_B64}"
+    fi
     echo " sing-box 版本: $(get_local_version)"
     echo "=================================================="
     echo ""
-    echo " 节点链接说明: 自签证书 + insecure=1 可直接导入；"
-    echo " 如需证书固定，请在 sing-box 客户端用 certificate_public_key_sha256 填入上面的 base64 公钥指纹。"
+    if [[ "$CERT_MODE_NOW" == "acme" ]]; then
+      echo " 节点链接使用真实证书，无需 insecure，可直接导入。"
+    else
+      echo " 节点链接说明: 自签证书 + insecure=1 可直接导入；"
+      echo " 如需证书固定，请在 sing-box 客户端用 certificate_public_key_sha256 填入上面的 base64 公钥指纹。"
+    fi
     [[ -n "$URI_V4" ]] && echo -e "\n【IPv4 节点链接】\n${URI_V4}"
     [[ -n "$URI_V6" ]] && echo -e "\n【IPv6 节点链接】\n${URI_V6}"
   } > "$LIST_FILE"
@@ -730,7 +775,8 @@ EOF
   echo -e "以下配置直接回车将使用默认值"
   echo ""
 
-  local input_port input_pass input_name input_sni
+  local input_port input_pass input_name input_sni input_cert_mode
+  local CERT_MODE="selfsigned" TLS_DOMAIN="" SNI=""
   read -rp "请输入 AnyTLS 端口 [默认: 26216]: " input_port
   local PORT=${input_port:-26216}
   while ! valid_port "$PORT" || is_port_used "$PORT"; do
@@ -747,13 +793,37 @@ EOF
   read -rp "请输入节点名称 [默认: ${DEF_NAME}]: " input_name
   local NAME=${input_name:-$DEF_NAME}
 
-  read -rp "请输入 SNI 域名 [默认: addons.mozilla.org]: " input_sni
-  local SNI=${input_sni:-addons.mozilla.org}
+  read -rp "是否使用自己的域名并自动申请 Let's Encrypt 证书? [y/N]: " input_cert_mode
+  if [[ "${input_cert_mode:-N}" =~ ^[Yy]$ ]]; then
+    CERT_MODE="acme"
+    read -rp "请输入你的域名 (必须已解析到本服务器，且 80/443 端口空闲): " TLS_DOMAIN
+    while [[ -z "$TLS_DOMAIN" || "$TLS_DOMAIN" =~ [[:space:]] ]]; do
+      print_warn "域名不能为空或包含空格"
+      read -rp "请输入你的域名: " TLS_DOMAIN
+    done
+    SNI="$TLS_DOMAIN"
+    if is_port_used 80 || is_port_used 443; then
+      print_warn "检测到 80 或 443 端口已被占用，ACME 证书申请可能失败"
+    fi
+    if command -v getent >/dev/null 2>&1 && [[ -n "$IPV4" ]]; then
+      local RESOLVED_IP=$(getent ahostsv4 "$TLS_DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')
+      if [[ -n "$RESOLVED_IP" && "$RESOLVED_IP" != "$IPV4" ]]; then
+        print_warn "域名当前解析到 ${RESOLVED_IP}，与服务器 IPv4 ${IPV4} 不一致，证书申请可能失败"
+      fi
+    fi
+  else
+    read -rp "请输入 SNI 域名 [默认: addons.mozilla.org]: " input_sni
+    SNI=${input_sni:-addons.mozilla.org}
+  fi
 
   # 证书
-  print_info "生成自签 CA 及服务器证书..."
-  ssl_certificate "$SNI"
-  judge "证书生成"
+  if [[ "$CERT_MODE" == "acme" ]]; then
+    print_info "使用自己的域名，将在服务启动时自动申请 Let's Encrypt 证书..."
+  else
+    print_info "生成自签 CA 及服务器证书..."
+    ssl_certificate "$SNI"
+    judge "证书生成"
+  fi
 
   # 下载 sing-box
   print_info "获取 sing-box 最新版本..."
@@ -764,10 +834,12 @@ EOF
     exit 1
   fi
   print_ok "sing-box 已安装: ${VER}"
+  build_tls_json
 
   # 根据栈类型生成 sing-box 1.12+ 配置
   mkdir -p "$CONFIG_DIR"
   echo "$IP_STACK" > "$STACK_FILE"
+  echo "$CERT_MODE" > "$CERT_MODE_FILE"
 
   if [[ "$IP_STACK" == "v4only" ]]; then
     cat > "$CONFIG_JSON" <<EOF
@@ -791,11 +863,7 @@ EOF
                 "1=100-400",
                 "2=500-900"
             ],
-            "tls": {
-                "enabled": true,
-                "certificate_path": "${CONFIG_DIR}/cert/cert.pem",
-                "key_path": "${CONFIG_DIR}/cert/private.key"
-            }
+            ${TLS_JSON}
         }
     ],
     "outbounds": [
@@ -832,11 +900,7 @@ EOF
                 "1=100-400",
                 "2=500-900"
             ],
-            "tls": {
-                "enabled": true,
-                "certificate_path": "${CONFIG_DIR}/cert/cert.pem",
-                "key_path": "${CONFIG_DIR}/cert/private.key"
-            }
+            ${TLS_JSON}
         }
     ],
     "outbounds": [
@@ -874,11 +938,7 @@ EOF
                 "1=100-400",
                 "2=500-900"
             ],
-            "tls": {
-                "enabled": true,
-                "certificate_path": "${CONFIG_DIR}/cert/cert.pem",
-                "key_path": "${CONFIG_DIR}/cert/private.key"
-            }
+            ${TLS_JSON}
         }
     ],
     "outbounds": [
@@ -917,6 +977,13 @@ EOF
   systemctl enable anytls >/dev/null 2>&1 || true
   systemctl restart anytls >/dev/null 2>&1 || true
   sleep 2
+  if [[ "$CERT_MODE" == "acme" ]] && ! systemctl is-active --quiet anytls; then
+    # 首次启动需要申请证书，多等一会儿
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      sleep 2
+      systemctl is-active --quiet anytls && break
+    done
+  fi
 
   if ! systemctl is-active --quiet anytls; then
     print_err "AnyTLS 启动失败"
@@ -1119,7 +1186,7 @@ change_port() {
   if is_active; then
     print_ok "端口已更新为: ${NEW_PORT}"
     local PASS=$(jq -r '.inbounds[0].users[0].password' "$CONFIG_JSON")
-    local SNI=$(openssl x509 -noout -subject -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'CN *= *' '/subject=/{print $2}')
+    local SNI=$(get_current_sni)
     local NAME=$(cat "$NAME_FILE" 2>/dev/null || jq -r '.inbounds[0].tag' "$CONFIG_JSON" 2>/dev/null || echo "AnyTLS")
     export_client_info "$NEW_PORT" "$PASS" "${SNI:-addons.mozilla.org}" "$NAME"
   else
@@ -1157,7 +1224,7 @@ change_password() {
   if is_active; then
     print_ok "密码已更新"
     local PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_JSON")
-    local SNI=$(openssl x509 -noout -subject -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'CN *= *' '/subject=/{print $2}')
+    local SNI=$(get_current_sni)
     local NAME=$(cat "$NAME_FILE" 2>/dev/null || jq -r '.inbounds[0].tag' "$CONFIG_JSON" 2>/dev/null || echo "AnyTLS")
     export_client_info "$PORT" "$NEW_PASS" "${SNI:-addons.mozilla.org}" "$NAME"
   else
@@ -1170,7 +1237,7 @@ change_password() {
 change_sni() {
   clear
   hr
-  print_info "更改 SNI 并重新生成证书"
+  print_info "更改 SNI / 证书域名"
   hr
 
   if ! is_installed; then
@@ -1179,16 +1246,26 @@ change_sni() {
     return
   fi
 
-  local CUR_SNI=$(openssl x509 -noout -subject -in "${CONFIG_DIR}/cert/cert.pem" 2>/dev/null | awk -F 'CN *= *' '/subject=/{print $2}')
+  local CUR_SNI=$(get_current_sni)
   local input
-  read -rp "请输入新 SNI [当前: ${CUR_SNI:-addons.mozilla.org}]: " input
+  read -rp "请输入新域名 [当前: ${CUR_SNI:-addons.mozilla.org}]: " input
   local NEW_SNI=${input:-${CUR_SNI:-addons.mozilla.org}}
 
   [[ "$NEW_SNI" = "$CUR_SNI" ]] && { print_ok "SNI 未变更"; pause; return; }
 
-  print_info "重新生成证书..."
-  ssl_certificate "$NEW_SNI"
-  judge "证书生成"
+  if [[ "$(get_cert_mode)" == "acme" ]]; then
+    print_info "更新 ACME 证书域名..."
+    if jq -e '.inbounds[0].tls.certificate_provider.domain[0]' "$CONFIG_JSON" >/dev/null 2>&1; then
+      jq --arg d "$NEW_SNI" '.inbounds[0].tls.certificate_provider.domain = [$d]' "$CONFIG_JSON" > "${CONFIG_JSON}.tmp" && mv "${CONFIG_JSON}.tmp" "$CONFIG_JSON"
+    else
+      jq --arg d "$NEW_SNI" '.inbounds[0].tls.acme.domain = [$d]' "$CONFIG_JSON" > "${CONFIG_JSON}.tmp" && mv "${CONFIG_JSON}.tmp" "$CONFIG_JSON"
+    fi
+    judge "证书域名更新"
+  else
+    print_info "重新生成自签证书..."
+    ssl_certificate "$NEW_SNI"
+    judge "证书生成"
+  fi
 
   systemctl restart anytls >/dev/null 2>&1 || true
   sleep 1
@@ -1277,7 +1354,7 @@ main() {
     echo -e "${Cyan} 3. 查看节点配置${Font}"
     echo -e "${Cyan} 4. 更改端口${Font}"
     echo -e "${Cyan} 5. 更改密码${Font}"
-    echo -e "${Cyan} 6. 更改 SNI / 重新生成证书${Font}"
+    echo -e "${Cyan} 6. 更改 SNI / 证书域名${Font}"
     echo -e "${Cyan} 7. 重启服务${Font}"
     echo -e "${Cyan} 8. 查看运行状态${Font}"
     echo -e "${Cyan} 9. 卸载 AnyTLS${Font}"

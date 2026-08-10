@@ -9,6 +9,7 @@
 - 一键安装 / 重装 AnyTLS（sing-box）
 - 自动识别 amd64 / arm64 架构
 - 自动生成自签 CA + 服务器证书
+- 可选使用自己的域名 + Let's Encrypt 真实证书（自动申请、自动续期）
 - 自动生成标准 AnyTLS 客户端链接
 - 支持仅 IPv4 / 仅 IPv6 / 双栈（IPv6 入站 + IPv4 出站解锁）
 - BBR + fq + TCP 优化，按内存自动选择参数档位
@@ -33,6 +34,11 @@ bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls)
 ```
 
 一路回车即可使用默认配置（随机密码、默认端口、双栈）。
+
+安装过程中会询问是否使用自己的域名：
+
+- 输入 `y`：使用你自己的域名，脚本会配置 sing-box 自动申请 Let's Encrypt 证书（需要域名已解析到本服务器，且 80/443 端口空闲）。
+- 输入 `n` 或直接回车：继续使用自签证书 + 默认 SNI。
 
 ## 菜单说明
 
@@ -59,6 +65,9 @@ anytls://密码@服务器IP:端口?sni=域名&udp=1&insecure=1&allowInsecure=1#�
 ```
 
 支持 sing-box、Clash Meta / Mihomo、Shadowrocket、v2rayN 等支持 AnyTLS 的客户端。
+
+- 使用自签证书时，链接带 `insecure=1`，这是正常设计。
+- 使用自己的域名 + Let's Encrypt 真实证书时，链接不带 `insecure`，证书校验更安全。
 
 > 由于默认使用自签证书，链接中带有 `insecure=1`，这是正常设计。如果需要证书固定，可以使用脚本输出的「证书公钥指纹（sing-box pinSHA256）」，在 sing-box 客户端的 `certificate_public_key_sha256` 中填入。
 
@@ -114,7 +123,10 @@ anytls://密码@服务器IP:端口?sni=域名&udp=1&insecure=1&allowInsecure=1#�
 
 ### 为什么节点链接带 `insecure=1`？
 
-因为默认使用自签证书，客户端需要跳过证书校验。想要更安全，可以使用脚本输出的公钥指纹做证书固定。
+因为默认使用自签证书，客户端需要跳过证书校验。想要更安全，可以：
+
+1. 使用脚本输出的公钥指纹做证书固定；
+2. 或在安装时选择自己的域名，使用 Let's Encrypt 真实证书，链接将不再需要 `insecure`。
 
 ### 修改端口 / 密码 / SNI 后节点链接会更新吗？
 
