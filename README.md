@@ -88,7 +88,7 @@ anytls://密码@服务器IP:端口?sni=域名&udp=1&insecure=1&allowInsecure=1#�
 脚本会根据服务器内存自动调整 Swap：
 
 - 内存小于 1G：自动创建 512M 的 `/swapfile` 并写入 `/etc/fstab`（开机自动挂载）
-- 内存大于等于 1G：自动关闭 Swap，并删除脚本创建的 `/swapfile` 和对应 fstab 条目
+- 内存大于等于 1G：自动关闭全部 Swap（含系统自带的 swap 分区/文件），并移除 `/etc/fstab` 中所有 swap 条目，防止重启后恢复；同时删除脚本创建的 `/swapfile`
 
 该逻辑在安装时自动执行，也可以随时选择菜单 `10. 重新应用网络优化 / 调整 Swap` 重新调整。
 
