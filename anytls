@@ -22,7 +22,7 @@ CERT_MODE_FILE="${CONFIG_DIR}/.cert_mode"
 NET_NOFILE_LIMIT=1048576
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.3.2"
+SHELL_VERSION="1.3.3"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -165,9 +165,15 @@ read_port_interactive() {
 get_ip() {
   local ip4 ip6
   ip4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
-  [[ -n "$ip4" ]] && { echo "$ip4"; return; }
+  if [[ -n "$ip4" ]]; then
+    echo "$ip4"
+    return
+  fi
   ip6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || true)
-  [[ -n "$ip6" ]] && { echo "$ip6"; return; }
+  if [[ -n "$ip6" ]]; then
+    echo "$ip6"
+    return
+  fi
   echo "未知"
 }
 
@@ -479,8 +485,12 @@ export_client_info() {
   if [[ "$CERT_MODE_NOW" != "acme" ]]; then
     QUERY="${QUERY}&insecure=1&allowInsecure=1"
   fi
-  [[ -n "$IPV4" ]] && URI_V4="anytls://${PASS_ENC}@${IPV4}:${PORT}?${QUERY}#${NAME_ENC}"
-  [[ -n "$IPV6" ]] && URI_V6="anytls://${PASS_ENC}@[${IPV6}]:${PORT}?${QUERY}#${NAME_ENC}"
+  if [[ -n "$IPV4" ]]; then
+    URI_V4="anytls://${PASS_ENC}@${IPV4}:${PORT}?${QUERY}#${NAME_ENC}"
+  fi
+  if [[ -n "$IPV6" ]]; then
+    URI_V6="anytls://${PASS_ENC}@[${IPV6}]:${PORT}?${QUERY}#${NAME_ENC}"
+  fi
 
   {
     echo "=========== AnyTLS (sing-box) 配置参数 ==========="
@@ -493,8 +503,12 @@ export_client_info() {
     if [[ "$CERT_MODE_NOW" == "acme" ]]; then
       echo " 证书: Let's Encrypt 自动续期"
     else
-      [[ -n "$FINGERPRINT_SHA256" ]] && echo " 证书指纹 (SHA-256): ${FINGERPRINT_SHA256}"
-      [[ -n "$PUBKEY_B64" ]] && echo " 证书公钥指纹 (sing-box pinSHA256): ${PUBKEY_B64}"
+      if [[ -n "$FINGERPRINT_SHA256" ]]; then
+        echo " 证书指纹 (SHA-256): ${FINGERPRINT_SHA256}"
+      fi
+      if [[ -n "$PUBKEY_B64" ]]; then
+        echo " 证书公钥指纹 (sing-box pinSHA256): ${PUBKEY_B64}"
+      fi
     fi
     echo " sing-box 版本: $(get_local_version)"
     echo "=================================================="
@@ -505,8 +519,12 @@ export_client_info() {
       echo " 节点链接说明: 自签证书 + insecure=1 可直接导入；"
       echo " 如需证书固定，请在 sing-box 客户端用 certificate_public_key_sha256 填入上面的 base64 公钥指纹。"
     fi
-    [[ -n "$URI_V4" ]] && echo -e "\n【IPv4 节点链接】\n${URI_V4}"
-    [[ -n "$URI_V6" ]] && echo -e "\n【IPv6 节点链接】\n${URI_V6}"
+    if [[ -n "$URI_V4" ]]; then
+      echo -e "\n【IPv4 节点链接】\n${URI_V4}"
+    fi
+    if [[ -n "$URI_V6" ]]; then
+      echo -e "\n【IPv6 节点链接】\n${URI_V6}"
+    fi
   } > "$LIST_FILE"
 }
 
@@ -1066,7 +1084,9 @@ update_anytls() {
 
   [[ ! "${ans:-N}" =~ ^[Yy]$ ]] && {
     print_info "已取消"
-    [[ "$AUTO_UPDATE" != true ]] && pause
+    if [[ "$AUTO_UPDATE" != true ]]; then
+      pause
+    fi
     return
   }
 
@@ -1081,7 +1101,9 @@ update_anytls() {
   if [[ -z "$DOWNLOADED" ]]; then
     print_err "下载失败，恢复旧版本..."
     restore_old_binary
-    [[ "$AUTO_UPDATE" != true ]] && pause
+    if [[ "$AUTO_UPDATE" != true ]]; then
+      pause
+    fi
     return
   fi
 
@@ -1090,7 +1112,9 @@ update_anytls() {
     if ! /usr/local/bin/sing-box check -c "$CONFIG_JSON" >/dev/null 2>&1; then
       print_err "新版本与当前配置不兼容，恢复旧版本..."
       restore_old_binary
-      [[ "$AUTO_UPDATE" != true ]] && pause
+      if [[ "$AUTO_UPDATE" != true ]]; then
+        pause
+      fi
       return
     fi
   fi
@@ -1115,7 +1139,9 @@ update_anytls() {
       print_err "恢复后服务仍异常，请检查: journalctl -u anytls -n 30"
     fi
   fi
-  [[ "$AUTO_UPDATE" != true ]] && pause
+  if [[ "$AUTO_UPDATE" != true ]]; then
+    pause
+  fi
 }
 
 # ==================== 查看配置 ====================
