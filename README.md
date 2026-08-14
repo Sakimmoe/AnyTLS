@@ -92,6 +92,8 @@ anytls://密码@服务器IP:端口?sni=域名&udp=1&insecure=1&allowInsecure=1#�
 
 该逻辑在安装时自动执行，也可以随时选择菜单 `10. 重新应用网络优化 / 调整 Swap` 重新调整。
 
+> 额外保险：对于 1G 及以上内存的服务器，脚本还会安装一个开机自启的 `disable-swap.service`，每次开机在所有 swap 启用后立即执行 `swapoff -a`。即使 swap 不是由 `/etc/fstab` 启用（例如 GPT swap 分区自动挂载、`systemd-swap`、zram、云厂商脚本等），重启后也会被强制关闭。
+
 ## 防火墙说明
 
 - 脚本会启用 UFW，并默认拒绝所有入站，仅放行 SSH 和 AnyTLS 端口。
