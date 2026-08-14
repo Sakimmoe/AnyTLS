@@ -13,6 +13,7 @@
 - 自动生成标准 AnyTLS 客户端链接
 - 支持仅 IPv4 / 仅 IPv6 / 双栈（IPv6 入站 + IPv4 出站解锁）
 - BBR + fq + TCP 优化，并开启 TCP Fast Open
+- 自动检测内存：小于 1G 自动创建 512M Swap，大于等于 1G 自动关闭并清理 Swap
 - UFW 防火墙自动放行 SSH 和 AnyTLS 端口
 - systemd 服务管理，开机自启
 - 支持修改端口 / 密码 / SNI，并自动更新节点链接
@@ -53,7 +54,7 @@ bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls)
 | 7 | 重启服务 |
 | 8 | 查看运行状态 |
 | 9 | 卸载 AnyTLS |
-| 10 | 重新应用网络优化 |
+| 10 | 重新应用网络优化 / 调整 Swap |
 | 0 | 退出 |
 
 ## 客户端节点链接
@@ -81,6 +82,15 @@ anytls://密码@服务器IP:端口?sni=域名&udp=1&insecure=1&allowInsecure=1#�
 - 同时清理旧的 `/etc/sysctl.d/99-bbr.conf`，避免配置冲突
 
 已安装的服务器可以在菜单中选择 `10. 重新应用网络优化`，不会改动端口、密码等配置。
+
+## Swap 自动调整
+
+脚本会根据服务器内存自动调整 Swap：
+
+- 内存小于 1G：自动创建 512M 的 `/swapfile` 并写入 `/etc/fstab`（开机自动挂载）
+- 内存大于等于 1G：自动关闭 Swap，并删除脚本创建的 `/swapfile` 和对应 fstab 条目
+
+该逻辑在安装时自动执行，也可以随时选择菜单 `10. 重新应用网络优化 / 调整 Swap` 重新调整。
 
 ## 防火墙说明
 

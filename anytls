@@ -22,7 +22,7 @@ CERT_MODE_FILE="${CONFIG_DIR}/.cert_mode"
 NET_NOFILE_LIMIT=1048576
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.3.3"
+SHELL_VERSION="1.3.4"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -676,6 +676,72 @@ EOF
   print_ok "网络优化已应用"
 }
 
+# ==================== Swap 自动调整 ====================
+setup_swap() {
+  # 测试时可覆盖路径
+  local MEMINFO="${SWAP_MEMINFO:-/proc/meminfo}"
+  local SWAPS_FILE="${SWAP_SWAPS_FILE:-/proc/swaps}"
+  local FSTAB="${SWAP_FSTAB:-/etc/fstab}"
+  local SWAP_FILE="${SWAP_FILE:-/swapfile}"
+  local RAM_MB SWAP_KB
+
+  RAM_MB=$(awk '/^MemTotal:/{printf "%d", $2/1024}' "$MEMINFO" 2>/dev/null || echo 0)
+  SWAP_KB=$(awk 'NR>1{s+=$3}END{print s+0}' "$SWAPS_FILE" 2>/dev/null || echo 0)
+
+  if [[ -z "$RAM_MB" || "$RAM_MB" -eq 0 ]]; then
+    print_warn "无法获取内存大小，跳过 Swap 配置"
+    return 0
+  fi
+
+  if [[ "$RAM_MB" -lt 1024 ]]; then
+    # 内存不足 1G：确保有至少 512M swap
+    if [[ "$SWAP_KB" -ge 524288 ]]; then
+      print_ok "内存 ${RAM_MB}M，已有 $(awk 'BEGIN{printf "%.0f", '"$SWAP_KB"'/1024}')M Swap，无需新增"
+      return 0
+    fi
+
+    if [[ -f "$SWAP_FILE" ]]; then
+      local CUR_MB
+      CUR_MB=$(du -m "$SWAP_FILE" 2>/dev/null | awk '{print $1+0}' || echo 0)
+      if [[ "$CUR_MB" -ge 512 ]]; then
+        chmod 600 "$SWAP_FILE"
+        grep -qs "^${SWAP_FILE}[[:space:]]" "$FSTAB" || echo "${SWAP_FILE} none swap sw 0 0" >> "$FSTAB"
+        swapon "$SWAP_FILE" >/dev/null 2>&1 || true
+        print_ok "内存不足 1G，已启用现有 ${SWAP_FILE} (${CUR_MB}M)"
+        return 0
+      fi
+      # 已有 swapfile 但小于 512M，删掉重建
+      swapoff "$SWAP_FILE" >/dev/null 2>&1 || true
+      rm -f "$SWAP_FILE"
+    fi
+
+    print_info "内存不足 1G (${RAM_MB}M)，创建 512M Swap..."
+    if command -v fallocate >/dev/null 2>&1; then
+      fallocate -l 512M "$SWAP_FILE" 2>/dev/null || dd if=/dev/zero of="$SWAP_FILE" bs=1M count=512 2>/dev/null
+    else
+      dd if=/dev/zero of="$SWAP_FILE" bs=1M count=512 2>/dev/null
+    fi
+    chmod 600 "$SWAP_FILE"
+    mkswap "$SWAP_FILE" >/dev/null 2>&1
+    swapon "$SWAP_FILE" >/dev/null 2>&1
+    grep -qs "^${SWAP_FILE}[[:space:]]" "$FSTAB" || echo "${SWAP_FILE} none swap sw 0 0" >> "$FSTAB"
+    print_ok "Swap 已创建并启用 (512M)"
+  else
+    # 内存充足：关闭 swap，并清理脚本创建的 swapfile
+    if [[ "$SWAP_KB" -gt 0 ]]; then
+      print_info "内存充足 (${RAM_MB}M)，关闭 Swap..."
+      swapoff -a >/dev/null 2>&1 || true
+      if [[ -f "$SWAP_FILE" ]]; then
+        sed -i "\|^${SWAP_FILE}[[:space:]]|d" "$FSTAB" 2>/dev/null || true
+        rm -f "$SWAP_FILE"
+      fi
+      print_ok "Swap 已关闭"
+    else
+      print_ok "内存充足 (${RAM_MB}M)，Swap 未启用，无需处理"
+    fi
+  fi
+}
+
 install_anytls() {
   clear
   hr
@@ -743,6 +809,7 @@ nameserver 2001:4860:4860::8888
 EOF
 
   apply_network_optimization
+  setup_swap
 
   # 架构
   ARCH=$(get_arch)
@@ -1357,7 +1424,7 @@ main() {
     echo -e "${Cyan} 7. 重启服务${Font}"
     echo -e "${Cyan} 8. 查看运行状态${Font}"
     echo -e "${Cyan} 9. 卸载 AnyTLS${Font}"
-    echo -e "${Cyan} 10. 重新应用网络优化${Font}"
+    echo -e "${Cyan} 10. 重新应用网络优化 / 调整 Swap${Font}"
     echo -e "${Cyan} 0. 退出${Font}"
     hr
     read -rp "请输入数字 [0-10]: " choice
@@ -1372,7 +1439,7 @@ main() {
       7) restart_service ;;
       8) status_service ;;
       9) uninstall_anytls ;;
-      10) apply_network_optimization ;;
+      10) apply_network_optimization; setup_swap ;;
       0) exit 0 ;;
       *) print_warn "无效选项"; sleep 1 ;;
     esac
