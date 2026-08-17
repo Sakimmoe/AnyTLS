@@ -46,6 +46,7 @@ chattr +i /etc/resolv.conf >/dev/null 2>&1 || true
 cat > /etc/sysctl.d/99-bbr.conf << 'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_fastopen=3
 EOF
 sysctl --system >/dev/null 2>&1 || true
 

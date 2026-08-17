@@ -78,7 +78,6 @@ anytls://密码@服务器IP:端口?sni=域名&udp=1&insecure=1&allowInsecure=1#�
 
 - BBR 拥塞控制 + fq 队列
 - TCP Fast Open（内核 `tcp_fastopen=3` + sing-box `tcp_fast_open: true`）
-- 大缓冲区、高并发连接优化
 - 同时清理旧的 `/etc/sysctl.d/99-bbr.conf`，避免配置冲突
 
 已安装的服务器可以在菜单中选择 `10. 重新应用网络优化`，不会改动端口、密码等配置。
