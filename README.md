@@ -74,13 +74,32 @@ anytls://密码@服务器IP:端口?sni=域名&udp=1&insecure=1&allowInsecure=1#�
 
 ## 网络优化
 
-脚本会统一写入 `/etc/sysctl.conf` 并立即生效：
+脚本会写入 `/etc/sysctl.d/99-zz-anytls.conf` 并立即生效：
 
 - BBR 拥塞控制 + fq 队列
 - TCP Fast Open（内核 `tcp_fastopen=3` + sing-box `tcp_fast_open: true`）
-- 同时清理旧的 `/etc/sysctl.d/99-bbr.conf`，避免配置冲突
+- 不再覆盖 `/etc/sysctl.conf`，避免破坏系统或其他软件已有的内核参数
+- 自动加载/开机加载 `tcp_bbr`、`sch_fq` 模块（仅当内核以模块方式提供时）
+- 文件名以 `99-zz-` 开头，确保排在 `99-sysctl.conf` 等旧配置之后，避免被覆盖
+- 同时清理旧版本写入的 `/etc/sysctl.d/99-bbr.conf`，避免配置冲突
+
+> **Debian 13 说明**：Debian 13 的 systemd 已不再读取 `/etc/sysctl.conf`。旧版脚本把 BBR 写在该文件里，所以安装后立即生效、重启后却恢复为 cubic。本版本改用 `/etc/sysctl.d/`，重启后仍然生效。
 
 已安装的服务器可以在菜单中选择 `10. 重新应用网络优化`，不会改动端口、密码等配置。
+
+验证是否生效：
+
+```bash
+sysctl net.ipv4.tcp_congestion_control   # 应输出 bbr
+sysctl net.core.default_qdisc            # 应输出 fq
+```
+
+如果仍显示 cubic，请检查内核是否支持 BBR：
+
+```bash
+modprobe tcp_bbr
+sysctl -p /etc/sysctl.d/99-zz-anytls.conf
+```
 
 ## Swap 自动调整
 
@@ -112,15 +131,30 @@ anytls://密码@服务器IP:端口?sni=域名&udp=1&insecure=1&allowInsecure=1#�
 | 配置文件 | `/etc/anytls/config.json` |
 | 证书目录 | `/etc/anytls/cert/` |
 | systemd 服务 | `/etc/systemd/system/anytls.service` |
+| 网络优化 | `/etc/sysctl.d/99-zz-anytls.conf` |
+| 内核模块加载 | `/etc/modules-load.d/anytls-bbr.conf`（仅模块方式时需要） |
 | 定时清理 | `/etc/cron.d/anytls-cleanup` |
 | 节点信息 | `/etc/anytls/list` |
 | 快捷命令 | `/usr/local/bin/a`、`/usr/local/bin/anytls` |
 
 ## 卸载
 
-运行脚本后选择 `9. 卸载 AnyTLS`，会停止服务并删除相关文件。
+运行脚本后选择 `9. 卸载 AnyTLS`，会停止服务并删除相关文件，包括脚本写入的 BBR/fq 配置、内核模块加载配置和 `disable-swap.service`。
+
+> 卸载不会恢复旧版本曾经覆盖过的 `/etc/sysctl.conf`。如果之前在 `/etc/sysctl.conf` 里放过自定义内核参数，请从备份或系统文档中恢复。
 
 ## 常见问题
+
+### Debian 13 重启后 BBR 变成 cubic 怎么办？
+
+先确认已升级到本版本脚本，然后重新运行脚本并选择 `10. 重新应用网络优化 / 调整 Swap`。新版本会写入 `/etc/sysctl.d/99-zz-anytls.conf`，不再依赖 Debian 13 已废弃的 `/etc/sysctl.conf`。
+
+```bash
+sysctl net.ipv4.tcp_congestion_control
+# 期望输出：net.ipv4.tcp_congestion_control = bbr
+```
+
+如果执行后仍不是 bbr，请把 `modprobe tcp_bbr` 和 `sysctl -p /etc/sysctl.d/99-zz-anytls.conf` 的报错发出来，通常是内核本身未编译 BBR 支持。
 
 ### 支持 CentOS 吗？
 

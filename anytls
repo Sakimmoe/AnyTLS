@@ -10,7 +10,6 @@ export DEBIAN_FRONTEND=noninteractive
 
 # ==================== 配置路径 ====================
 CONFIG_DIR="/etc/anytls"
-WORK_DIR="$CONFIG_DIR"
 ANYTLS_SERVICE_NAME="anytls.service"
 ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}"
 CONFIG_JSON="${CONFIG_DIR}/config.json"
@@ -19,27 +18,27 @@ CRON_CLEAN="/etc/cron.d/anytls-cleanup"
 STACK_FILE="${CONFIG_DIR}/.stack"
 NAME_FILE="${CONFIG_DIR}/.name"
 CERT_MODE_FILE="${CONFIG_DIR}/.cert_mode"
+SYSCTL_FILE="/etc/sysctl.d/99-zz-anytls.conf"
+MODULES_LOAD_FILE="/etc/modules-load.d/anytls-bbr.conf"
+LEGACY_SYSCTL_FILE="/etc/sysctl.d/99-bbr.conf"
+SWAP_OFF_SERVICE_FILE="/etc/systemd/system/disable-swap.service"
 NET_NOFILE_LIMIT=1048576
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="1.3.8"
+SHELL_VERSION="1.3.9"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
 # ==================== 颜色配置 ====================
 Font="\033[0m"
-Black="\033[30m"
 Red="\033[31m"
 Green="\033[32m"
 Yellow="\033[33m"
 Blue="\033[34m"
 Magenta="\033[35m"
 Cyan="\033[36m"
-White="\033[37m"
 BRed="\033[91m"
 BGreen="\033[92m"
 BYellow="\033[93m"
-BCyan="\033[96m"
 Bold="\033[1m"
 
 OK="${Green}[OK]${Font}"
@@ -82,14 +81,15 @@ is_active()      { systemctl is-active "$ANYTLS_SERVICE_NAME" >/dev/null 2>&1; }
 
 get_local_version() {
   if binary_exists; then
-    /usr/local/bin/sing-box version 2>/dev/null | awk '/version/{print $NF}' || echo "unknown"
+    /usr/local/bin/sing-box version 2>/dev/null | awk '/^sing-box version /{print $NF; exit}' || echo "unknown"
   else
     echo "未安装"
   fi
 }
 
 get_remote_version() {
-  curl -s --connect-timeout 10 --max-time 20 "$GITHUB_API" | jq -r '.tag_name' 2>/dev/null | sed 's/^v//' || echo ""
+  curl -fsS --connect-timeout 10 --max-time 20 --retry 2 "$GITHUB_API" 2>/dev/null \
+    | jq -r '.tag_name' 2>/dev/null | sed 's/^v//' || echo ""
 }
 
 install_status_text() {
@@ -124,7 +124,8 @@ gen_password(){ cat /proc/sys/kernel/random/uuid; }
 
 valid_port() {
   local p="${1:-}"
-  [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 65535 ))
+  [[ "$p" =~ ^[1-9][0-9]*$ ]] || return 1
+  (( p >= 1 && p <= 65535 ))
 }
 
 is_port_used() {
@@ -153,7 +154,7 @@ read_port_interactive() {
       print_warn "端口不合法：$input"
       continue
     fi
-    if is_port_used "$input"; then
+    if [[ "$input" != "${current:-}" ]] && is_port_used "$input"; then
       print_warn "端口 $input 已被占用"
       continue
     fi
@@ -162,25 +163,45 @@ read_port_interactive() {
   done
 }
 
-get_ip() {
-  local ip4 ip6
-  ip4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
-  if [[ -n "$ip4" ]]; then
-    echo "$ip4"
-    return
-  fi
-  ip6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || true)
-  if [[ -n "$ip6" ]]; then
-    echo "$ip6"
-    return
-  fi
-  echo "未知"
+is_ipv4() {
+  local ip="${1:-}" octet
+  local -a octets
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r -a octets <<< "$ip"
+  for octet in "${octets[@]}"; do
+    (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+  done
+}
+
+is_ipv6() {
+  local ip="${1:-}"
+  [[ "$ip" == *:*:* ]] || return 1
+  [[ "$ip" =~ ^[0-9A-Fa-f:]+$ ]]
+}
+
+valid_domain() {
+  local domain="${1:-}"
+  [[ ${#domain} -ge 3 && ${#domain} -le 253 ]] || return 1
+  [[ "$domain" == *.* ]] || return 1
+  [[ "$domain" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
+}
+
+valid_tls_name() {
+  valid_domain "${1:-}" || is_ipv4 "${1:-}" || is_ipv6 "${1:-}"
 }
 
 check_system_ip() {
-  IPV4=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "")
-  IPV6=$(curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || echo "")
-  MAIN_IP=$([ -n "$IPV4" ] && echo "$IPV4" || echo "$IPV6")
+  local v4 v6
+  v4=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
+  v6=$(curl -6 -fsS --connect-timeout 3 https://api64.ipify.org 2>/dev/null || true)
+  v4=$(printf '%s' "$v4" | tr -d '[:space:]')
+  v6=$(printf '%s' "$v6" | tr -d '[:space:]')
+
+  IPV4=""
+  IPV6=""
+  is_ipv4 "$v4" && IPV4="$v4"
+  is_ipv6 "$v6" && IPV6="$v6"
+  MAIN_IP="${IPV4:-$IPV6}"
 
   if [[ -n "$IPV4" && -n "$IPV6" ]]; then
     IP_STACK="dual"
@@ -215,16 +236,65 @@ get_current_sni() {
 }
 
 build_tls_json() {
-  local CORE_MINOR=$(echo "$VER" | cut -d. -f2)
+  local core_minor
+  core_minor=$(printf '%s' "${VER:-}" | cut -d. -f2)
   if [[ "$CERT_MODE" == "acme" ]]; then
-    if [[ "${CORE_MINOR:-0}" -ge 14 ]]; then
-      TLS_JSON="\"tls\": { \"enabled\": true, \"certificate_provider\": { \"type\": \"acme\", \"domain\": [\"${TLS_DOMAIN}\"], \"data_directory\": \"${CONFIG_DIR}/certmagic\" } }"
+    if [[ "${core_minor:-0}" -ge 14 ]]; then
+      TLS_JSON=$(jq -cn --arg domain "$TLS_DOMAIN" --arg data "${CONFIG_DIR}/certmagic" \
+        '{enabled:true,certificate_provider:{type:"acme",domain:[$domain],data_directory:$data}}')
     else
-      TLS_JSON="\"tls\": { \"enabled\": true, \"acme\": { \"domain\": [\"${TLS_DOMAIN}\"], \"data_directory\": \"${CONFIG_DIR}/certmagic\" } }"
+      TLS_JSON=$(jq -cn --arg domain "$TLS_DOMAIN" --arg data "${CONFIG_DIR}/certmagic" \
+        '{enabled:true,acme:{domain:[$domain],data_directory:$data}}')
     fi
   else
-    TLS_JSON="\"tls\": { \"enabled\": true, \"certificate_path\": \"${CONFIG_DIR}/cert/cert.pem\", \"key_path\": \"${CONFIG_DIR}/cert/private.key\" }"
+    TLS_JSON=$(jq -cn --arg cert "${CONFIG_DIR}/cert/cert.pem" --arg key "${CONFIG_DIR}/cert/private.key" \
+      '{enabled:true,certificate_path:$cert,key_path:$key}')
   fi
+}
+
+build_config() {
+  local stack="$1" port="$2" password="$3" tls_json="$4"
+  local listen strategy
+  case "$stack" in
+    v4only) listen="0.0.0.0"; strategy="ipv4_only" ;;
+    v6only) listen="::"; strategy="ipv6_only" ;;
+    *)      listen="::"; strategy="ipv4_only" ;;
+  esac
+
+  # Use jq for all user-controlled values (password/domain) so quotes and
+  # backslashes cannot break the JSON or inject shell syntax.
+  jq -n \
+    --arg listen "$listen" \
+    --argjson port "$port" \
+    --arg password "$password" \
+    --argjson tls "$tls_json" \
+    --arg strategy "$strategy" '
+    {
+      log: { level: "warn" },
+      dns: { servers: [ { tag: "dns-local", type: "local" } ] },
+      inbounds: [
+        {
+          type: "anytls",
+          tag: "anytls-in",
+          listen: $listen,
+          listen_port: $port,
+          tcp_fast_open: true,
+          users: [ { password: $password } ],
+          padding_scheme: [ "stop=3", "0=30-50", "1=100-400", "2=500-900" ],
+          tls: $tls
+        }
+      ],
+      outbounds: [
+        {
+          type: "direct",
+          tag: "direct",
+          domain_resolver: { server: "dns-local", strategy: $strategy }
+        }
+      ]
+    }' > "${CONFIG_JSON}.tmp"
+
+  mv -f "${CONFIG_JSON}.tmp" "$CONFIG_JSON"
+  chmod 600 "$CONFIG_JSON"
 }
 
 # ==================== 证书生成 ====================
@@ -232,9 +302,16 @@ ssl_certificate() {
   local TLS_SERVER="$1"
   local CN_DOMAIN="$TLS_SERVER"
   local SAN_KIND="DNS"
-  mkdir -p "${CONFIG_DIR}/cert"
 
-  if [[ "$TLS_SERVER" =~ ^[0-9.]+$ || "$TLS_SERVER" =~ : ]]; then
+  if ! valid_tls_name "$TLS_SERVER"; then
+    print_err "证书域名格式不正确: ${TLS_SERVER}"
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}/cert"
+  chmod 700 "$CONFIG_DIR" "${CONFIG_DIR}/cert" 2>/dev/null || true
+
+  if is_ipv4 "$TLS_SERVER" || is_ipv6 "$TLS_SERVER"; then
     SAN_KIND="IP"
   fi
 
@@ -309,10 +386,11 @@ EOF
 # ==================== 下载 sing-box ====================
 download_singbox() {
   local DEST_BIN="${1:-/usr/local/bin/sing-box}"
-  local TMP_DL=$(mktemp -d /tmp/sing-box.XXXXXX)
+  local TMP_DL
+  TMP_DL=$(mktemp -d /tmp/sing-box.XXXXXX) || return 1
   local REL VER URL FILE
 
-  REL=$(curl -s --connect-timeout 10 --max-time 20 "$GITHUB_API" 2>/dev/null || true)
+  REL=$(curl -fsS --connect-timeout 10 --max-time 20 --retry 2 "$GITHUB_API" 2>/dev/null || true)
   VER=$(echo "$REL" | jq -r '.tag_name' 2>/dev/null || true)
 
   if [[ -z "$VER" || "$VER" = "null" ]]; then
@@ -320,27 +398,48 @@ download_singbox() {
     return 1
   fi
 
-  URL=$(echo "$REL" | jq -r ".assets[].browser_download_url" | grep -i "linux" | grep -i "$ARCH" | grep -v -i "sha256" | grep -v -i "v3" | head -1 || true)
+  # Pick the plain Linux tarball for this architecture first, then the glibc
+  # build. Avoid .deb/.rpm/.apk and Android assets that the old broad grep
+  # could accidentally select.
+  URL=$(printf '%s\n' "$REL" \
+    | jq -r '.assets[].browser_download_url' 2>/dev/null \
+    | grep -E "/sing-box-[^/]+-linux-${ARCH}\.tar\.gz$" \
+    | head -1 || true)
+  if [[ -z "$URL" ]]; then
+    URL=$(printf '%s\n' "$REL" \
+      | jq -r '.assets[].browser_download_url' 2>/dev/null \
+      | grep -E "/sing-box-[^/]+-linux-${ARCH}-glibc\.tar\.gz$" \
+      | head -1 || true)
+  fi
 
   if [[ -z "$URL" ]]; then
     rm -rf "$TMP_DL"
     return 1
   fi
 
-  wget --timeout=30 -q -O "${TMP_DL}/sing-box.pkg" "$URL" || {
+  if ! wget --timeout=30 --tries=3 -q -O "${TMP_DL}/sing-box.pkg" "$URL"; then
     rm -rf "$TMP_DL"
     return 1
-  }
-
-  if [[ "$URL" == *.tar.gz ]]; then
-    tar -xf "${TMP_DL}/sing-box.pkg" -C "${TMP_DL}"
-  elif [[ "$URL" == *.zip ]]; then
-    unzip -q -o "${TMP_DL}/sing-box.pkg" -d "${TMP_DL}"
-  else
-    cp "${TMP_DL}/sing-box.pkg" "${TMP_DL}/sing-box"
   fi
 
-  FILE=$(find "${TMP_DL}" -type f -name "sing-box" | head -1)
+  if [[ "$URL" == *.tar.gz ]]; then
+    if ! tar -xzf "${TMP_DL}/sing-box.pkg" -C "${TMP_DL}"; then
+      rm -rf "$TMP_DL"
+      return 1
+    fi
+  elif [[ "$URL" == *.zip ]]; then
+    if ! unzip -q -o "${TMP_DL}/sing-box.pkg" -d "${TMP_DL}"; then
+      rm -rf "$TMP_DL"
+      return 1
+    fi
+  else
+    cp "${TMP_DL}/sing-box.pkg" "${TMP_DL}/sing-box" || {
+      rm -rf "$TMP_DL"
+      return 1
+    }
+  fi
+
+  FILE=$(find "${TMP_DL}" -type f -name "sing-box" -print -quit)
   if [[ -z "$FILE" ]]; then
     rm -rf "$TMP_DL"
     return 1
@@ -405,9 +504,12 @@ setup_ufw() {
     ufw allow 80/tcp comment 'ACME HTTP' >/dev/null 2>&1 || true
     ufw allow 443/tcp comment 'ACME TLS' >/dev/null 2>&1 || true
   fi
-  ufw --force enable >/dev/null 2>&1 || true
+  if ! ufw --force enable >/dev/null 2>&1; then
+    print_warn "UFW 启用失败，请手动检查防火墙；确认已放行 ${PORT}/tcp"
+    return 0
+  fi
   ufw reload >/dev/null 2>&1 || true
-  judge "UFW 防火墙配置"
+  print_ok "UFW 防火墙配置完成"
 }
 
 # ==================== 定时任务 ====================
@@ -457,9 +559,12 @@ EOF
 # ==================== 导出节点信息 ====================
 export_client_info() {
   local PORT="$1" PASS="$2" SNI="$3" NAME="$4"
-  check_system_ip
+  if [[ -z "${IPV4:-}" && -z "${IPV6:-}" ]]; then
+    check_system_ip
+  fi
 
-  local CERT_MODE_NOW=$(get_cert_mode)
+  local CERT_MODE_NOW
+  CERT_MODE_NOW=$(get_cert_mode)
   local FINGERPRINT_SHA256="" PUBKEY_B64=""
   if [[ "$CERT_MODE_NOW" != "acme" ]]; then
     local CERT_FILE="${CONFIG_DIR}/cert/cert.pem"
@@ -526,6 +631,7 @@ export_client_info() {
       echo -e "\n【IPv6 节点链接】\n${URI_V6}"
     fi
   } > "$LIST_FILE"
+  chmod 600 "$LIST_FILE"
 }
 
 # ==================== 快捷命令配置 ====================
@@ -535,9 +641,15 @@ create_shortcut() {
   local SRC=""
 
   mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR" 2>/dev/null || true
 
-  # 1. 优先尝试定位当前脚本所在路径
+  # 1. 优先尝试定位当前脚本所在路径。
+  # 通过 bash <(curl ...) 运行时 BASH_SOURCE 是 /dev/fd/N，不能可靠地再次读取，
+  # 跳过这些路径，改用 SCRIPT_URL 下载完整面板。
   for candidate in "${BASH_SOURCE[0]:-}" "$0"; do
+    case "$candidate" in
+      /dev/fd/*|/proc/self/fd/*|/proc/*/fd/*) continue ;;
+    esac
     if [[ -n "$candidate" && -f "$candidate" && -r "$candidate" ]]; then
       if grep -q "AnyTLS (sing-box) 一键管理脚本" "$candidate" 2>/dev/null; then
         SRC="$candidate"
@@ -559,13 +671,23 @@ create_shortcut() {
     fi
     print_ok "面板脚本已成功保存"
   elif [[ -n "${SCRIPT_URL:-}" ]]; then
+    local TMP_PANEL="${PANEL}.tmp.$$"
     print_info "尝试从远程 URL 下载脚本保存面板..."
-    if curl -sSL --connect-timeout 10 -o "$PANEL" "$SCRIPT_URL" 2>/dev/null || wget -q -O "$PANEL" "$SCRIPT_URL" 2>/dev/null; then
-      chmod +x "$PANEL"
-      if [[ ! "$PANEL" -ef "$PANEL_BAK" ]]; then
-        cp -f "$PANEL" "$PANEL_BAK" 2>/dev/null || true
+    if curl -fsSL --connect-timeout 10 --retry 2 -o "$TMP_PANEL" "$SCRIPT_URL" 2>/dev/null \
+      || wget -q -O "$TMP_PANEL" "$SCRIPT_URL" 2>/dev/null; then
+      if grep -q "AnyTLS (sing-box) 一键管理脚本" "$TMP_PANEL" 2>/dev/null; then
+        chmod +x "$TMP_PANEL"
+        mv -f "$TMP_PANEL" "$PANEL"
+        if [[ ! "$PANEL" -ef "$PANEL_BAK" ]]; then
+          cp -f "$PANEL" "$PANEL_BAK" 2>/dev/null || true
+        fi
+        print_ok "已从远程下载并保存面板脚本"
+      else
+        print_warn "远程脚本内容校验失败，已保留原面板"
+        rm -f "$TMP_PANEL"
       fi
-      print_ok "已从远程下载并保存面板脚本"
+    else
+      rm -f "$TMP_PANEL"
     fi
   fi
 
@@ -637,17 +759,60 @@ EOF
 
 # ==================== 核心功能：安装 ====================
 apply_network_optimization() {
-  # 删除旧的 sysctl.d 配置，统一写入 /etc/sysctl.conf
-  rm -f /etc/sysctl.d/99-bbr.conf
+  print_info "应用 BBR / fq / TCP Fast Open..."
+  mkdir -p /etc/sysctl.d /etc/modules-load.d
 
-  cat > /etc/sysctl.conf <<'EOF'
+  # Debian 13 (systemd 256+) no longer reads /etc/sysctl.conf at boot.
+  # Always write the modern /etc/sysctl.d location; never overwrite the
+  # administrator's /etc/sysctl.conf.
+  cat > "$SYSCTL_FILE" <<'EOF'
+# Managed by the AnyTLS installer. Re-run menu 10 to regenerate.
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_fastopen = 3
 EOF
+  chmod 644 "$SYSCTL_FILE"
+  rm -f "$LEGACY_SYSCTL_FILE"
 
-  sysctl -p >/dev/null 2>&1 || print_warn "sysctl -p 有参数未能生效，请手动执行 sysctl -p 查看错误"
+  # Make sure BBR/fq are available before applying the sysctl. If they are
+  # loadable modules, also load them early at boot.
+  local module module_path
+  local -a kernel_modules=()
+  for module in tcp_bbr sch_fq; do
+    if command -v modprobe >/dev/null 2>&1; then
+      modprobe "$module" >/dev/null 2>&1 || true
+    fi
+    module_path=""
+    if command -v modinfo >/dev/null 2>&1; then
+      module_path=$(modinfo -F filename "$module" 2>/dev/null || true)
+    fi
+    if [[ -n "$module_path" && "$module_path" != "(builtin)" ]]; then
+      kernel_modules+=("$module")
+    fi
+  done
+
+  if (( ${#kernel_modules[@]} > 0 )); then
+    printf '%s\n' "${kernel_modules[@]}" > "$MODULES_LOAD_FILE"
+    chmod 644 "$MODULES_LOAD_FILE"
+  else
+    rm -f "$MODULES_LOAD_FILE"
+  fi
+
+  # Apply the whole system first, then re-apply our file so it wins over any
+  # other 99-* file on the current boot.
   sysctl --system >/dev/null 2>&1 || print_warn "sysctl --system 有参数未能生效，请手动执行 sysctl --system 查看错误"
+  if ! sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1; then
+    print_warn "BBR 参数未能立即生效，请运行: sysctl -p $SYSCTL_FILE"
+  fi
+
+  local cc qdisc
+  cc=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || echo "unknown")
+  qdisc=$(cat /proc/sys/net/core/default_qdisc 2>/dev/null || echo "unknown")
+  if [[ "$cc" == "bbr" && "$qdisc" == "fq" ]]; then
+    print_ok "BBR + fq 已生效（重启后仍会加载）"
+  else
+    print_warn "BBR/fq 未完全生效（当前: ${cc}/${qdisc}）。请确认内核支持: modprobe tcp_bbr && sysctl -p $SYSCTL_FILE"
+  fi
 
   if [[ -f "$ANYTLS_SERVICE_FILE" ]] && grep -q '^LimitNOFILE=' "$ANYTLS_SERVICE_FILE"; then
     sed -i "s/^LimitNOFILE=.*/LimitNOFILE=${NET_NOFILE_LIMIT}/" "$ANYTLS_SERVICE_FILE"
@@ -662,7 +827,7 @@ EOF
       fi
     fi
   fi
-  print_ok "网络优化已应用"
+  print_ok "网络优化配置已写入 ${SYSCTL_FILE}"
 }
 
 # ==================== Swap 自动调整 ====================
@@ -672,7 +837,7 @@ setup_swap() {
   local SWAPS_FILE="${SWAP_SWAPS_FILE:-/proc/swaps}"
   local FSTAB="${SWAP_FSTAB:-/etc/fstab}"
   local SWAP_FILE="${SWAP_FILE:-/swapfile}"
-  local SWAP_OFF_SERVICE="${SWAP_OFF_SERVICE:-/etc/systemd/system/disable-swap.service}"
+  local SWAP_OFF_SERVICE="${SWAP_OFF_SERVICE:-$SWAP_OFF_SERVICE_FILE}"
   local RAM_MB SWAP_KB
 
   RAM_MB=$(awk '/^MemTotal:/{printf "%d", $2/1024}' "$MEMINFO" 2>/dev/null || echo 0)
@@ -689,7 +854,7 @@ setup_swap() {
     # 内存不足 1G 档：确保有至少 512M swap
     # 移除“开机强制关闭 swap”的服务，避免把我们创建的 swap 在重启后关掉
     if [[ -f "$SWAP_OFF_SERVICE" ]]; then
-      systemctl disable disable-swap.service >/dev/null 2>&1 || true
+      systemctl disable --now disable-swap.service >/dev/null 2>&1 || true
       rm -f "$SWAP_OFF_SERVICE"
       systemctl daemon-reload >/dev/null 2>&1 || true
     fi
@@ -745,6 +910,7 @@ setup_swap() {
 Description=Disable Swap (managed by one-click proxy script)
 DefaultDependencies=no
 After=swap.target local-fs.target
+Before=multi-user.target
 
 [Service]
 Type=oneshot
@@ -754,6 +920,7 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
+    chmod 644 "$SWAP_OFF_SERVICE"
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable disable-swap.service >/dev/null 2>&1 || true
     if [[ "$SWAP_KB" -gt 0 ]]; then
@@ -774,7 +941,6 @@ install_anytls() {
   if is_installed; then
     print_info "检测到已有安装，先停止服务..."
     systemctl stop anytls >/dev/null 2>&1 || true
-    systemctl disable anytls >/dev/null 2>&1 || true
     rm -f /usr/local/bin/sing-box.bak
     rm -f /usr/local/bin/sing-box.tmp.*
     rm -f "${CONFIG_DIR}"/*.tmp 2>/dev/null || true
@@ -786,17 +952,17 @@ install_anytls() {
   print_info "安装依赖..."
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -qq >/dev/null 2>&1 || true
-    apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar openssl >/dev/null 2>&1 || true
+    apt-get install -y -qq wget unzip curl ufw iproute2 cron jq tar openssl procps kmod >/dev/null 2>&1 || true
   elif command -v dnf >/dev/null 2>&1; then
     dnf update -y >/dev/null 2>&1 || true
-    dnf install -y wget unzip curl firewalld cronie jq tar openssl >/dev/null 2>&1 || true
+    dnf install -y wget unzip curl firewalld cronie jq tar openssl procps-ng kmod >/dev/null 2>&1 || true
   elif command -v yum >/dev/null 2>&1; then
     yum update -y >/dev/null 2>&1 || true
-    yum install -y wget unzip curl firewalld cronie jq tar openssl >/dev/null 2>&1 || true
+    yum install -y wget unzip curl firewalld cronie jq tar openssl procps-ng kmod >/dev/null 2>&1 || true
   fi
-  judge "依赖安装"
+  print_ok "依赖安装完成"
 
-  for c in wget unzip curl jq tar openssl; do
+  for c in wget unzip curl jq tar openssl sysctl; do
     command -v "$c" >/dev/null 2>&1 || { print_err "缺少必要依赖: $c"; exit 1; }
   done
 
@@ -820,6 +986,7 @@ install_anytls() {
   systemctl mask resolvconf >/dev/null 2>&1 || true
 
   # 直接删掉旧文件（可能是软链接），防止 resolvconf 再次覆盖
+  chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
   rm -f /etc/resolv.conf
 
   # 重新写入
@@ -863,11 +1030,17 @@ EOF
     PORT=${input_port:-26216}
   done
 
-  local DEF_PASS=$(gen_password)
+  local DEF_PASS
+  DEF_PASS=$(gen_password)
+  if [[ -z "$DEF_PASS" ]]; then
+    print_err "无法生成随机密码，请检查 /proc/sys/kernel/random/uuid"
+    exit 1
+  fi
   read -rp "请输入 AnyTLS 密码 [默认: ${DEF_PASS}]: " input_pass
   local PASS=${input_pass:-$DEF_PASS}
 
-  local DEF_NAME=$(hostname 2>/dev/null || echo "AnyTLS")
+  local DEF_NAME
+  DEF_NAME=$(hostname 2>/dev/null || echo "AnyTLS")
   read -rp "请输入节点名称 [默认: ${DEF_NAME}]: " input_name
   local NAME=${input_name:-$DEF_NAME}
 
@@ -875,8 +1048,8 @@ EOF
   if [[ "${input_cert_mode:-N}" =~ ^[Yy]$ ]]; then
     CERT_MODE="acme"
     read -rp "请输入你的域名 (必须已解析到本服务器，且 80/443 端口空闲): " TLS_DOMAIN
-    while [[ -z "$TLS_DOMAIN" || "$TLS_DOMAIN" =~ [[:space:]] ]]; do
-      print_warn "域名不能为空或包含空格"
+    while ! valid_domain "$TLS_DOMAIN"; do
+      print_warn "域名格式不正确: ${TLS_DOMAIN:-<空>}"
       read -rp "请输入你的域名: " TLS_DOMAIN
     done
     SNI="$TLS_DOMAIN"
@@ -884,7 +1057,8 @@ EOF
       print_warn "检测到 80 或 443 端口已被占用，ACME 证书申请可能失败"
     fi
     if command -v getent >/dev/null 2>&1 && [[ -n "$IPV4" ]]; then
-      local RESOLVED_IP=$(getent ahostsv4 "$TLS_DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')
+      local RESOLVED_IP
+      RESOLVED_IP=$(getent ahostsv4 "$TLS_DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')
       if [[ -n "$RESOLVED_IP" && "$RESOLVED_IP" != "$IPV4" ]]; then
         print_warn "域名当前解析到 ${RESOLVED_IP}，与服务器 IPv4 ${IPV4} 不一致，证书申请可能失败"
       fi
@@ -892,6 +1066,11 @@ EOF
   else
     read -rp "请输入 SNI 域名 [默认: addons.mozilla.org]: " input_sni
     SNI=${input_sni:-addons.mozilla.org}
+    while ! valid_tls_name "$SNI"; do
+      print_warn "SNI 格式不正确: ${SNI:-<空>}"
+      read -rp "请输入 SNI 域名: " input_sni
+      SNI=${input_sni:-addons.mozilla.org}
+    done
   fi
 
   # 证书
@@ -905,7 +1084,8 @@ EOF
 
   # 下载 sing-box
   print_info "获取 sing-box 最新版本..."
-  local VER=$(download_singbox /usr/local/bin/sing-box)
+  local VER
+  VER=$(download_singbox /usr/local/bin/sing-box)
   if [[ -z "$VER" ]]; then
     print_err "下载 sing-box 失败"
     systemctl restart anytls >/dev/null 2>&1 || true
@@ -916,125 +1096,19 @@ EOF
 
   # 根据栈类型生成 sing-box 1.12+ 配置
   mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
   echo "$IP_STACK" > "$STACK_FILE"
   echo "$CERT_MODE" > "$CERT_MODE_FILE"
 
-  if [[ "$IP_STACK" == "v4only" ]]; then
-    cat > "$CONFIG_JSON" <<EOF
-{
-    "log": { "level": "warn" },
-    "dns": {
-        "servers": [
-            { "tag": "dns-local", "type": "local" }
-        ]
-    },
-    "inbounds": [
-        {
-            "type": "anytls",
-            "tag": "anytls-in",
-            "listen": "0.0.0.0",
-            "listen_port": ${PORT},
-            "tcp_fast_open": true,
-            "users": [{ "password": "${PASS}" }],
-            "padding_scheme": [
-                "stop=3",
-                "0=30-50",
-                "1=100-400",
-                "2=500-900"
-            ],
-            ${TLS_JSON}
-        }
-    ],
-    "outbounds": [
-        {
-            "type": "direct",
-            "tag": "direct",
-            "domain_resolver": {
-                "server": "dns-local",
-                "strategy": "ipv4_only"
-            }
-        }
-    ]
-}
-EOF
-  elif [[ "$IP_STACK" == "v6only" ]]; then
-    cat > "$CONFIG_JSON" <<EOF
-{
-    "log": { "level": "warn" },
-    "dns": {
-        "servers": [
-            { "tag": "dns-local", "type": "local" }
-        ]
-    },
-    "inbounds": [
-        {
-            "type": "anytls",
-            "tag": "anytls-in",
-            "listen": "::",
-            "listen_port": ${PORT},
-            "tcp_fast_open": true,
-            "users": [{ "password": "${PASS}" }],
-            "padding_scheme": [
-                "stop=3",
-                "0=30-50",
-                "1=100-400",
-                "2=500-900"
-            ],
-            ${TLS_JSON}
-        }
-    ],
-    "outbounds": [
-        {
-            "type": "direct",
-            "tag": "direct",
-            "domain_resolver": {
-                "server": "dns-local",
-                "strategy": "ipv6_only"
-            }
-        }
-    ]
-}
-EOF
-  else
-    # dual stack: v6 监听（Linux 默认同时接受 v4），出站强制 ipv4_only 确保解锁走 v4
-    cat > "$CONFIG_JSON" <<EOF
-{
-    "log": { "level": "warn" },
-    "dns": {
-        "servers": [
-            { "tag": "dns-local", "type": "local" }
-        ]
-    },
-    "inbounds": [
-        {
-            "type": "anytls",
-            "tag": "anytls-in",
-            "listen": "::",
-            "listen_port": ${PORT},
-            "tcp_fast_open": true,
-            "users": [{ "password": "${PASS}" }],
-            "padding_scheme": [
-                "stop=3",
-                "0=30-50",
-                "1=100-400",
-                "2=500-900"
-            ],
-            ${TLS_JSON}
-        }
-    ],
-    "outbounds": [
-        {
-            "type": "direct",
-            "tag": "direct",
-            "domain_resolver": {
-                "server": "dns-local",
-                "strategy": "ipv4_only"
-            }
-        }
-    ]
-}
-EOF
+  build_config "$IP_STACK" "$PORT" "$PASS" "$TLS_JSON"
+  judge "sing-box 配置生成"
+
+  if ! /usr/local/bin/sing-box check -c "$CONFIG_JSON" >/dev/null 2>&1; then
+    print_err "sing-box 配置校验失败:"
+    /usr/local/bin/sing-box check -c "$CONFIG_JSON" || true
+    exit 1
   fi
+  print_ok "sing-box 配置校验通过"
 
   # systemd
   cat > "$ANYTLS_SERVICE_FILE" <<EOF
@@ -1052,6 +1126,9 @@ RestartSec=3s
 [Install]
 WantedBy=multi-user.target
 EOF
+
+  # 先放行端口再启动服务，避免 ACME HTTP-01 在首次启动时被 UFW 拦截
+  setup_ufw "$PORT"
 
   systemctl daemon-reload
   systemctl enable anytls >/dev/null 2>&1 || true
@@ -1071,9 +1148,6 @@ EOF
     exit 1
   fi
   judge "服务启动"
-
-  # 防火墙
-  setup_ufw "$PORT"
 
   # 定时任务
   setup_cron
@@ -1265,6 +1339,7 @@ change_port() {
   [[ "$NEW_PORT" = "$CUR_PORT" ]] && { print_ok "端口未变更"; pause; return; }
 
   jq --argjson port "$NEW_PORT" '.inbounds[0].listen_port = $port' "$CONFIG_JSON" > "${CONFIG_JSON}.tmp" && mv "${CONFIG_JSON}.tmp" "$CONFIG_JSON"
+  chmod 600 "$CONFIG_JSON"
   judge "配置更新"
 
   setup_ufw "$NEW_PORT"
@@ -1305,6 +1380,7 @@ change_password() {
   [[ "$NEW_PASS" = "$CUR_PASS" ]] && { print_ok "密码未变更"; pause; return; }
 
   jq --arg pass "$NEW_PASS" '.inbounds[0].users[0].password = $pass' "$CONFIG_JSON" > "${CONFIG_JSON}.tmp" && mv "${CONFIG_JSON}.tmp" "$CONFIG_JSON"
+  chmod 600 "$CONFIG_JSON"
   judge "密码更新"
 
   systemctl restart anytls >/dev/null 2>&1 || true
@@ -1341,15 +1417,28 @@ change_sni() {
 
   [[ "$NEW_SNI" = "$CUR_SNI" ]] && { print_ok "SNI 未变更"; pause; return; }
 
-  if [[ "$(get_cert_mode)" == "acme" ]]; then
+  local CERT_MODE_NOW
+  CERT_MODE_NOW=$(get_cert_mode)
+  if [[ "$CERT_MODE_NOW" == "acme" ]]; then
+    if ! valid_domain "$NEW_SNI"; then
+      print_err "ACME 域名格式不正确: ${NEW_SNI}"
+      pause
+      return
+    fi
     print_info "更新 ACME 证书域名..."
     if jq -e '.inbounds[0].tls.certificate_provider.domain[0]' "$CONFIG_JSON" >/dev/null 2>&1; then
       jq --arg d "$NEW_SNI" '.inbounds[0].tls.certificate_provider.domain = [$d]' "$CONFIG_JSON" > "${CONFIG_JSON}.tmp" && mv "${CONFIG_JSON}.tmp" "$CONFIG_JSON"
     else
       jq --arg d "$NEW_SNI" '.inbounds[0].tls.acme.domain = [$d]' "$CONFIG_JSON" > "${CONFIG_JSON}.tmp" && mv "${CONFIG_JSON}.tmp" "$CONFIG_JSON"
     fi
+    chmod 600 "$CONFIG_JSON"
     judge "证书域名更新"
   else
+    if ! valid_tls_name "$NEW_SNI"; then
+      print_err "SNI 格式不正确: ${NEW_SNI}"
+      pause
+      return
+    fi
     print_info "重新生成自签证书..."
     ssl_certificate "$NEW_SNI"
     judge "证书生成"
@@ -1387,7 +1476,7 @@ restart_service() {
 
 status_service() {
   clear
-  systemctl status anytls --no-pager
+  systemctl status anytls --no-pager || true
   pause
 }
 
@@ -1395,7 +1484,7 @@ status_service() {
 uninstall_anytls() {
   clear
   hr
-  if ! is_installed; then
+  if ! is_installed && [[ ! -f "$SYSCTL_FILE" ]] && [[ ! -f "$MODULES_LOAD_FILE" ]] && [[ ! -f "$SWAP_OFF_SERVICE_FILE" ]]; then
     print_err "AnyTLS 未安装"
     pause
     return
@@ -1411,8 +1500,15 @@ uninstall_anytls() {
   rm -f "$ANYTLS_SERVICE_FILE"
   systemctl daemon-reload >/dev/null 2>&1 || true
 
+  print_info "清理网络优化与 Swap 服务..."
+  systemctl stop disable-swap.service >/dev/null 2>&1 || true
+  systemctl disable disable-swap.service >/dev/null 2>&1 || true
+  rm -f "$SWAP_OFF_SERVICE_FILE" "$SYSCTL_FILE" "$MODULES_LOAD_FILE" "$LEGACY_SYSCTL_FILE"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
   print_info "清理文件..."
   rm -f /usr/local/bin/sing-box /usr/local/bin/sing-box.bak
+  rm -f /usr/local/bin/sing-box.tmp.*
   rm -f /usr/local/bin/anytls
   rm -f /usr/local/bin/a
   rm -f /usr/local/bin/anytls-panel.sh
