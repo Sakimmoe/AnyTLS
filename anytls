@@ -1383,6 +1383,9 @@ change_port() {
 
   if [[ "$NEW_PORT" == "443" && "$(get_cert_mode)" == "acme" ]]; then
     print_warn "443 模式已禁用 ACME TLS-ALPN，证书续期依赖 80 端口 HTTP-01"
+    if is_port_used 80; then
+      print_warn "80 端口已被占用，ACME 续期可能失败；请释放 80 或改用外部证书/DNS-01"
+    fi
   fi
 
   setup_ufw "$NEW_PORT"
