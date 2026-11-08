@@ -24,7 +24,7 @@ LEGACY_SYSCTL_FILE="/etc/sysctl.d/99-bbr.conf"
 SWAP_OFF_SERVICE_FILE="/etc/systemd/system/disable-swap.service"
 NET_NOFILE_LIMIT=1048576
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-SHELL_VERSION="1.3.9"
+SHELL_VERSION="1.3.10"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -236,15 +236,19 @@ get_current_sni() {
 }
 
 build_tls_json() {
-  local core_minor
+  local core_minor port="${1:-443}" disable_alpn=false
   core_minor=$(printf '%s' "${VER:-}" | cut -d. -f2)
+  # AnyTLS 监听 443 时，ACME 的 TLS-ALPN 验证会和入站抢 443。
+  # 禁用 TLS-ALPN，只走 80 端口的 HTTP-01，避免首次签发和后续续期冲突。
+  [[ "$port" == "443" ]] && disable_alpn=true
+
   if [[ "$CERT_MODE" == "acme" ]]; then
     if [[ "${core_minor:-0}" -ge 14 ]]; then
-      TLS_JSON=$(jq -cn --arg domain "$TLS_DOMAIN" --arg data "${CONFIG_DIR}/certmagic" \
-        '{enabled:true,certificate_provider:{type:"acme",domain:[$domain],data_directory:$data}}')
+      TLS_JSON=$(jq -cn --arg domain "$TLS_DOMAIN" --arg data "${CONFIG_DIR}/certmagic" --argjson disable "$disable_alpn" \
+        '{enabled:true,certificate_provider:({type:"acme",domain:[$domain],data_directory:$data} + (if $disable then {disable_tls_alpn_challenge:true} else {} end))}')
     else
-      TLS_JSON=$(jq -cn --arg domain "$TLS_DOMAIN" --arg data "${CONFIG_DIR}/certmagic" \
-        '{enabled:true,acme:{domain:[$domain],data_directory:$data}}')
+      TLS_JSON=$(jq -cn --arg domain "$TLS_DOMAIN" --arg data "${CONFIG_DIR}/certmagic" --argjson disable "$disable_alpn" \
+        '{enabled:true,acme:({domain:[$domain],data_directory:$data} + (if $disable then {disable_tls_alpn_challenge:true} else {} end))}')
     fi
   else
     TLS_JSON=$(jq -cn --arg cert "${CONFIG_DIR}/cert/cert.pem" --arg key "${CONFIG_DIR}/cert/private.key" \
@@ -293,6 +297,28 @@ build_config() {
       ]
     }' > "${CONFIG_JSON}.tmp"
 
+  mv -f "${CONFIG_JSON}.tmp" "$CONFIG_JSON"
+  chmod 600 "$CONFIG_JSON"
+}
+
+# 443 与 ACME TLS-ALPN 冲突时，切换为仅 HTTP-01；换回其他端口时恢复。
+set_acme_alpn_policy() {
+  local port="$1" tls_path=""
+  [[ "$(get_cert_mode)" == "acme" ]] || return 0
+
+  if jq -e '.inbounds[0].tls.certificate_provider' "$CONFIG_JSON" >/dev/null 2>&1; then
+    tls_path='.inbounds[0].tls.certificate_provider'
+  elif jq -e '.inbounds[0].tls.acme' "$CONFIG_JSON" >/dev/null 2>&1; then
+    tls_path='.inbounds[0].tls.acme'
+  else
+    return 0
+  fi
+
+  if [[ "$port" == "443" ]]; then
+    jq --argjson v true "${tls_path}.disable_tls_alpn_challenge = \$v" "$CONFIG_JSON" > "${CONFIG_JSON}.tmp"
+  else
+    jq "del(${tls_path}.disable_tls_alpn_challenge)" "$CONFIG_JSON" > "${CONFIG_JSON}.tmp"
+  fi
   mv -f "${CONFIG_JSON}.tmp" "$CONFIG_JSON"
   chmod 600 "$CONFIG_JSON"
 }
@@ -1022,12 +1048,12 @@ EOF
 
   local input_port input_pass input_name input_sni input_cert_mode
   local CERT_MODE="selfsigned" TLS_DOMAIN="" SNI=""
-  read -rp "请输入 AnyTLS 端口 [默认: 26216]: " input_port
-  local PORT=${input_port:-26216}
+  read -rp "请输入 AnyTLS 端口 [默认: 443]: " input_port
+  local PORT=${input_port:-443}
   while ! valid_port "$PORT" || is_port_used "$PORT"; do
     print_warn "端口无效或已被占用"
-    read -rp "请输入 AnyTLS 端口 [默认: 26216]: " input_port
-    PORT=${input_port:-26216}
+    read -rp "请输入 AnyTLS 端口 [默认: 443]: " input_port
+    PORT=${input_port:-443}
   done
 
   local DEF_PASS
@@ -1055,6 +1081,13 @@ EOF
     SNI="$TLS_DOMAIN"
     if is_port_used 80 || is_port_used 443; then
       print_warn "检测到 80 或 443 端口已被占用，ACME 证书申请可能失败"
+    fi
+    if [[ "$PORT" == "443" ]]; then
+      print_info "AnyTLS 使用 443：ACME 将禁用 TLS-ALPN，仅使用 80 端口的 HTTP-01"
+      if is_port_used 80; then
+        print_warn "80 端口已被占用；请释放 80，或改用外部证书/DNS-01，否则证书签发和续期会失败"
+      fi
+      print_warn "请确保云安全组和 UFW 都放行 TCP 80，否则 443 端口的 ACME 证书无法续期"
     fi
     if command -v getent >/dev/null 2>&1 && [[ -n "$IPV4" ]]; then
       local RESOLVED_IP
@@ -1092,7 +1125,7 @@ EOF
     exit 1
   fi
   print_ok "sing-box 已安装: ${VER}"
-  build_tls_json
+  build_tls_json "$PORT"
 
   # 根据栈类型生成 sing-box 1.12+ 配置
   mkdir -p "$CONFIG_DIR"
@@ -1333,14 +1366,24 @@ change_port() {
     return
   fi
 
-  local CUR_PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_JSON" 2>/dev/null || echo "26216")
+  local CUR_PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_JSON" 2>/dev/null || echo "443")
   local NEW_PORT=$(read_port_interactive "" "$CUR_PORT")
 
-  [[ "$NEW_PORT" = "$CUR_PORT" ]] && { print_ok "端口未变更"; pause; return; }
+  [[ "$NEW_PORT" = "$CUR_PORT" ]] && {
+    set_acme_alpn_policy "$CUR_PORT" || true
+    print_ok "端口未变更"
+    pause
+    return
+  }
 
   jq --argjson port "$NEW_PORT" '.inbounds[0].listen_port = $port' "$CONFIG_JSON" > "${CONFIG_JSON}.tmp" && mv "${CONFIG_JSON}.tmp" "$CONFIG_JSON"
   chmod 600 "$CONFIG_JSON"
+  set_acme_alpn_policy "$NEW_PORT"
   judge "配置更新"
+
+  if [[ "$NEW_PORT" == "443" && "$(get_cert_mode)" == "acme" ]]; then
+    print_warn "443 模式已禁用 ACME TLS-ALPN，证书续期依赖 80 端口 HTTP-01"
+  fi
 
   setup_ufw "$NEW_PORT"
 

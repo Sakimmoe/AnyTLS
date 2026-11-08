@@ -34,12 +34,14 @@
 bash <(curl -sL https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls)
 ```
 
-一路回车即可使用默认配置（随机密码、默认端口、双栈）。
+一路回车即可使用默认配置（随机密码、默认端口 443、双栈）。
 
 安装过程中会询问是否使用自己的域名：
 
 - 输入 `y`：使用你自己的域名，脚本会配置 sing-box 自动申请 Let's Encrypt 证书（需要域名已解析到本服务器，且 80/443 端口空闲）。
 - 输入 `n` 或直接回车：继续使用自签证书 + 默认 SNI。
+
+> 默认端口是 `443`。如果同时选择 ACME，脚本会禁用 ACME 的 TLS-ALPN 验证，只使用 `80` 端口的 HTTP-01，避免和 AnyTLS 抢 443。请确保云安全组和 UFW 都放行 TCP `80`，否则首次签发和后续续期会失败。
 
 ## 菜单说明
 
@@ -155,6 +157,16 @@ sysctl net.ipv4.tcp_congestion_control
 ```
 
 如果执行后仍不是 bbr，请把 `modprobe tcp_bbr` 和 `sysctl -p /etc/sysctl.d/99-zz-anytls.conf` 的报错发出来，通常是内核本身未编译 BBR 支持。
+
+### 默认端口 443 后，ACME 还能自动续期吗？
+
+可以，但有前提：AnyTLS 占用 443 后，脚本会禁用 ACME 的 TLS-ALPN 验证，只使用 **80 端口的 HTTP-01**。因此必须保证：
+
+- 云安全组和 UFW 都放行 TCP `80`；
+- 80 端口没有被 Nginx/Caddy 等其他服务占用；
+- Cloudflare 保持 DNS only，不要开橙色云朵。
+
+否则首次签发或后续续期会失败。若 80 无法开放，需要改用 DNS-01 或外部证书。
 
 ### 支持 CentOS 吗？
 
