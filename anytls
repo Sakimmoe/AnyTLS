@@ -24,7 +24,7 @@ LEGACY_SYSCTL_FILE="/etc/sysctl.d/99-bbr.conf"
 SWAP_OFF_SERVICE_FILE="/etc/systemd/system/disable-swap.service"
 NET_NOFILE_LIMIT=1048576
 GITHUB_API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-SHELL_VERSION="1.3.10"
+SHELL_VERSION="9.9"
 # 可选：如果将本脚本托管在 GitHub/Gist 等位置，在此填入 Raw 链接，在线一键安装时也能自动下载面板
 SCRIPT_URL="https://raw.githubusercontent.com/Sakimmoe/AnyTLS/main/anytls"
 
@@ -525,7 +525,6 @@ setup_ufw() {
 
   ufw allow "${SSH_PORT}/tcp" comment 'SSH' >/dev/null 2>&1 || true
   ufw allow "${PORT}/tcp" comment 'AnyTLS TCP' >/dev/null 2>&1 || true
-  ufw allow "${PORT}/udp" comment 'AnyTLS UDP' >/dev/null 2>&1 || true
   if [[ "$(get_cert_mode)" == "acme" ]]; then
     ufw allow 80/tcp comment 'ACME HTTP' >/dev/null 2>&1 || true
     ufw allow 443/tcp comment 'ACME TLS' >/dev/null 2>&1 || true
@@ -1313,6 +1312,12 @@ update_anytls() {
       fi
       return
     fi
+  fi
+
+  local CUR_PORT
+  CUR_PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_JSON" 2>/dev/null || true)
+  if [[ -n "$CUR_PORT" ]]; then
+    set_acme_alpn_policy "$CUR_PORT" || true
   fi
 
   print_info "重启服务..."

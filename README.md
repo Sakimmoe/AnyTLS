@@ -119,7 +119,7 @@ sysctl -p /etc/sysctl.d/99-zz-anytls.conf
 - 脚本会启用 UFW，并默认拒绝所有入站，仅放行 SSH 和 AnyTLS 端口。
 - 执行安装 / 改端口时会重置 UFW 规则，请知悉。
 - 如果使用云服务商安全组，请额外放行 AnyTLS 的 TCP 端口。
-- AnyTLS 实际只使用 TCP，UDP 规则保留但非必需。
+- AnyTLS 实际只使用 TCP，脚本只放行 TCP，不再额外放行 UDP。
 
 ## DNS 说明
 
