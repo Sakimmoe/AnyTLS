@@ -13,6 +13,7 @@
 - 自动生成标准 AnyTLS 客户端链接
 - 支持仅 IPv4 / 仅 IPv6 / 双栈（IPv6 入站 + IPv4 出站解锁）
 - BBR + fq + TCP 优化，并开启 TCP Fast Open
+- AnyTLS 使用 sing-box 官方默认 padding scheme（`stop=8`），增强抗包长分析
 - 自动检测内存：小于 1G 自动创建 512M Swap，大于等于 1G 自动关闭并清理 Swap
 - UFW 防火墙自动放行 SSH 和 AnyTLS 端口
 - systemd 服务管理，开机自启
